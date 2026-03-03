@@ -77,6 +77,8 @@ Operational note:
 ### Read endpoints
 - `GET /v1/health`
 - `GET /v1/stats/summary`
+- `GET /v1/stats/me-writers`
+- `GET /v1/stats/dcs`
 - `GET /v1/stats/users`
 - `GET /v1/users`
 - `GET /v1/users/{username}`
@@ -101,6 +103,62 @@ Derived runtime fields (read-only in API responses):
 - `current_connections`
 - `active_unique_ips`
 - `total_octets`
+
+## Transport Status Endpoints
+### `GET /v1/stats/me-writers`
+Returns current Middle-End writer status and aggregated coverage/availability summary.
+
+Top-level fields:
+- `middle_proxy_enabled`
+- `generated_at_epoch_secs`
+- `summary`
+- `writers`
+
+Summary fields:
+- `configured_dc_groups`
+- `configured_endpoints`
+- `available_endpoints`
+- `available_pct`
+- `required_writers`
+- `alive_writers`
+- `coverage_pct`
+
+Writer fields:
+- `writer_id`
+- `dc`
+- `endpoint` (`ip:port`)
+- `generation`
+- `state` (`warm|active|draining`)
+- `draining`
+- `degraded`
+- `bound_clients`
+- `idle_for_secs`
+- `rtt_ema_ms`
+
+### `GET /v1/stats/dcs`
+Returns per-DC status aggregated from current ME pool.
+
+Top-level fields:
+- `middle_proxy_enabled`
+- `generated_at_epoch_secs`
+- `dcs`
+
+DC row fields:
+- `dc`
+- `endpoints` (`ip:port[]`)
+- `available_endpoints`
+- `available_pct`
+- `required_writers`
+- `alive_writers`
+- `coverage_pct`
+- `rtt_ms`
+- `load`
+
+Metrics formulas:
+- `available_pct = available_endpoints / configured_endpoints * 100`
+- `coverage_pct = alive_writers / required_writers * 100`
+- `required_writers` uses the runtime writer floor policy for each DC group.
+- `load` is the number of active client sessions currently bound to that DC.
 
 ## Validation Rules
 - `username` must match `[A-Za-z0-9_.-]`, length `1..64`.
