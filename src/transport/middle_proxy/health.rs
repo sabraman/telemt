@@ -42,7 +42,12 @@ struct DcFloorPlanEntry {
 #[derive(Debug, Clone)]
 struct FamilyFloorPlan {
     by_dc: HashMap<i32, DcFloorPlanEntry>,
-    global_cap_effective_total: usize,
+    active_cap_configured_total: usize,
+    active_cap_effective_total: usize,
+    warm_cap_configured_total: usize,
+    warm_cap_effective_total: usize,
+    active_writers_current: usize,
+    warm_writers_current: usize,
     target_writers_total: usize,
 }
 
@@ -169,6 +174,14 @@ async fn check_family(
     for writer in pool.writers.read().await.iter().filter(|w| {
         !w.draining.load(std::sync::atomic::Ordering::Relaxed)
     }) {
+        if !matches!(
+            super::pool::WriterContour::from_u8(
+                writer.contour.load(std::sync::atomic::Ordering::Relaxed),
+            ),
+            super::pool::WriterContour::Active
+        ) {
+            continue;
+        }
         let key = (writer.writer_dc, writer.addr);
         *live_addr_counts.entry(key).or_insert(0) += 1;
         live_writer_ids_by_addr
@@ -194,8 +207,13 @@ async fn check_family(
     )
     .await;
     pool.set_adaptive_floor_runtime_caps(
-        floor_plan.global_cap_effective_total,
+        floor_plan.active_cap_configured_total,
+        floor_plan.active_cap_effective_total,
+        floor_plan.warm_cap_configured_total,
+        floor_plan.warm_cap_effective_total,
         floor_plan.target_writers_total,
+        floor_plan.active_writers_current,
+        floor_plan.warm_writers_current,
     );
 
     for (dc, endpoints) in dc_endpoints {
@@ -344,8 +362,8 @@ async fn check_family(
                 break;
             }
             reconnect_budget = reconnect_budget.saturating_sub(1);
-            if pool.floor_mode() == MeFloorMode::Adaptive
-                && pool.active_writer_count_total().await >= floor_plan.global_cap_effective_total
+            if pool.active_contour_writer_count_total().await
+                >= floor_plan.active_cap_effective_total
             {
                 let swapped = maybe_swap_idle_writer_for_cap(
                     pool,
@@ -370,7 +388,7 @@ async fn check_family(
                     ?family,
                     alive,
                     required,
-                    global_cap_effective_total = floor_plan.global_cap_effective_total,
+                    active_cap_effective_total = floor_plan.active_cap_effective_total,
                     "Adaptive floor cap reached, reconnect attempt blocked"
                 );
                 break;
@@ -518,6 +536,8 @@ async fn build_family_floor_plan(
     let floor_mode = pool.floor_mode();
     let is_adaptive = floor_mode == MeFloorMode::Adaptive;
     let cpu_cores = pool.adaptive_floor_effective_cpu_cores().max(1);
+    let (active_writers_current, warm_writers_current, _) =
+        pool.non_draining_writer_counts_by_contour().await;
 
     for (dc, endpoints) in dc_endpoints {
         if endpoints.is_empty() {
@@ -576,9 +596,16 @@ async fn build_family_floor_plan(
     }
 
     if entries.is_empty() {
+        let active_cap_configured_total = pool.adaptive_floor_active_cap_configured_total();
+        let warm_cap_configured_total = pool.adaptive_floor_warm_cap_configured_total();
         return FamilyFloorPlan {
             by_dc,
-            global_cap_effective_total: 0,
+            active_cap_configured_total,
+            active_cap_effective_total: active_cap_configured_total,
+            warm_cap_configured_total,
+            warm_cap_effective_total: warm_cap_configured_total,
+            active_writers_current,
+            warm_writers_current,
             target_writers_total: 0,
         };
     }
@@ -588,20 +615,26 @@ async fn build_family_floor_plan(
             .iter()
             .map(|entry| entry.target_required)
             .sum::<usize>();
-        let active_total = pool.active_writer_count_total().await;
+        let active_cap_configured_total = pool.adaptive_floor_active_cap_configured_total();
+        let warm_cap_configured_total = pool.adaptive_floor_warm_cap_configured_total();
         for entry in entries {
             by_dc.insert(entry.dc, entry);
         }
         return FamilyFloorPlan {
             by_dc,
-            global_cap_effective_total: active_total.max(target_total),
+            active_cap_configured_total,
+            active_cap_effective_total: active_cap_configured_total.max(target_total),
+            warm_cap_configured_total,
+            warm_cap_effective_total: warm_cap_configured_total,
+            active_writers_current,
+            warm_writers_current,
             target_writers_total: target_total,
         };
     }
 
-    let global_cap_raw = pool.adaptive_floor_global_cap_raw();
-    let total_active = pool.active_writer_count_total().await;
-    let other_active = total_active.saturating_sub(family_active_total);
+    let active_cap_configured_total = pool.adaptive_floor_active_cap_configured_total();
+    let warm_cap_configured_total = pool.adaptive_floor_warm_cap_configured_total();
+    let other_active = active_writers_current.saturating_sub(family_active_total);
     let min_sum = entries
         .iter()
         .map(|entry| entry.min_required)
@@ -610,7 +643,7 @@ async fn build_family_floor_plan(
         .iter()
         .map(|entry| entry.target_required)
         .sum::<usize>();
-    let family_cap = global_cap_raw
+    let family_cap = active_cap_configured_total
         .saturating_sub(other_active)
         .max(min_sum);
     if target_sum > family_cap {
@@ -645,11 +678,17 @@ async fn build_family_floor_plan(
     for entry in entries {
         by_dc.insert(entry.dc, entry);
     }
-    let global_cap_effective_total = global_cap_raw.max(other_active.saturating_add(min_sum));
+    let active_cap_effective_total =
+        active_cap_configured_total.max(other_active.saturating_add(min_sum));
     let target_writers_total = other_active.saturating_add(target_sum);
     FamilyFloorPlan {
         by_dc,
-        global_cap_effective_total,
+        active_cap_configured_total,
+        active_cap_effective_total,
+        warm_cap_configured_total,
+        warm_cap_effective_total: warm_cap_configured_total,
+        active_writers_current,
+        warm_writers_current,
         target_writers_total,
     }
 }

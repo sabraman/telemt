@@ -380,11 +380,25 @@ async fn get_minimal_payload_cached(
             .adaptive_floor_max_extra_writers_single_per_core,
         adaptive_floor_max_extra_writers_multi_per_core: runtime
             .adaptive_floor_max_extra_writers_multi_per_core,
+        adaptive_floor_max_active_writers_per_core: runtime
+            .adaptive_floor_max_active_writers_per_core,
+        adaptive_floor_max_warm_writers_per_core: runtime
+            .adaptive_floor_max_warm_writers_per_core,
+        adaptive_floor_max_active_writers_global: runtime
+            .adaptive_floor_max_active_writers_global,
+        adaptive_floor_max_warm_writers_global: runtime
+            .adaptive_floor_max_warm_writers_global,
         adaptive_floor_cpu_cores_detected: runtime.adaptive_floor_cpu_cores_detected,
         adaptive_floor_cpu_cores_effective: runtime.adaptive_floor_cpu_cores_effective,
         adaptive_floor_global_cap_raw: runtime.adaptive_floor_global_cap_raw,
         adaptive_floor_global_cap_effective: runtime.adaptive_floor_global_cap_effective,
         adaptive_floor_target_writers_total: runtime.adaptive_floor_target_writers_total,
+        adaptive_floor_active_cap_configured: runtime.adaptive_floor_active_cap_configured,
+        adaptive_floor_active_cap_effective: runtime.adaptive_floor_active_cap_effective,
+        adaptive_floor_warm_cap_configured: runtime.adaptive_floor_warm_cap_configured,
+        adaptive_floor_warm_cap_effective: runtime.adaptive_floor_warm_cap_effective,
+        adaptive_floor_active_writers_current: runtime.adaptive_floor_active_writers_current,
+        adaptive_floor_warm_writers_current: runtime.adaptive_floor_warm_writers_current,
         me_keepalive_enabled: runtime.me_keepalive_enabled,
         me_keepalive_interval_secs: runtime.me_keepalive_interval_secs,
         me_keepalive_jitter_secs: runtime.me_keepalive_jitter_secs,

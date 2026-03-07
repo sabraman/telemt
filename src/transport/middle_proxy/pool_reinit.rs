@@ -249,6 +249,7 @@ impl MePool {
                             rng,
                             generation,
                             WriterContour::Warm,
+                            false,
                         )
                         .await;
                     debug!(

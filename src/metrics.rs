@@ -1055,6 +1055,102 @@ async fn render_metrics(stats: &Stats, config: &ProxyConfig, ip_tracker: &UserIp
     );
     let _ = writeln!(
         out,
+        "# HELP telemt_me_adaptive_floor_active_cap_configured Runtime configured active writer cap"
+    );
+    let _ = writeln!(
+        out,
+        "# TYPE telemt_me_adaptive_floor_active_cap_configured gauge"
+    );
+    let _ = writeln!(
+        out,
+        "telemt_me_adaptive_floor_active_cap_configured {}",
+        if me_allows_normal {
+            stats.get_me_floor_active_cap_configured_gauge()
+        } else {
+            0
+        }
+    );
+    let _ = writeln!(
+        out,
+        "# HELP telemt_me_adaptive_floor_active_cap_effective Runtime effective active writer cap"
+    );
+    let _ = writeln!(
+        out,
+        "# TYPE telemt_me_adaptive_floor_active_cap_effective gauge"
+    );
+    let _ = writeln!(
+        out,
+        "telemt_me_adaptive_floor_active_cap_effective {}",
+        if me_allows_normal {
+            stats.get_me_floor_active_cap_effective_gauge()
+        } else {
+            0
+        }
+    );
+    let _ = writeln!(
+        out,
+        "# HELP telemt_me_adaptive_floor_warm_cap_configured Runtime configured warm writer cap"
+    );
+    let _ = writeln!(
+        out,
+        "# TYPE telemt_me_adaptive_floor_warm_cap_configured gauge"
+    );
+    let _ = writeln!(
+        out,
+        "telemt_me_adaptive_floor_warm_cap_configured {}",
+        if me_allows_normal {
+            stats.get_me_floor_warm_cap_configured_gauge()
+        } else {
+            0
+        }
+    );
+    let _ = writeln!(
+        out,
+        "# HELP telemt_me_adaptive_floor_warm_cap_effective Runtime effective warm writer cap"
+    );
+    let _ = writeln!(
+        out,
+        "# TYPE telemt_me_adaptive_floor_warm_cap_effective gauge"
+    );
+    let _ = writeln!(
+        out,
+        "telemt_me_adaptive_floor_warm_cap_effective {}",
+        if me_allows_normal {
+            stats.get_me_floor_warm_cap_effective_gauge()
+        } else {
+            0
+        }
+    );
+    let _ = writeln!(
+        out,
+        "# HELP telemt_me_writers_active_current Current non-draining active ME writers"
+    );
+    let _ = writeln!(out, "# TYPE telemt_me_writers_active_current gauge");
+    let _ = writeln!(
+        out,
+        "telemt_me_writers_active_current {}",
+        if me_allows_normal {
+            stats.get_me_writers_active_current_gauge()
+        } else {
+            0
+        }
+    );
+    let _ = writeln!(
+        out,
+        "# HELP telemt_me_writers_warm_current Current non-draining warm ME writers"
+    );
+    let _ = writeln!(out, "# TYPE telemt_me_writers_warm_current gauge");
+    let _ = writeln!(
+        out,
+        "telemt_me_writers_warm_current {}",
+        if me_allows_normal {
+            stats.get_me_writers_warm_current_gauge()
+        } else {
+            0
+        }
+    );
+    let _ = writeln!(
+        out,
         "# HELP telemt_me_floor_cap_block_total Reconnect attempts blocked by adaptive floor caps"
     );
     let _ = writeln!(out, "# TYPE telemt_me_floor_cap_block_total counter");

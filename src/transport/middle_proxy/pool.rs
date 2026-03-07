@@ -125,11 +125,21 @@ pub struct MePool {
     pub(super) me_adaptive_floor_cpu_cores_override: AtomicU32,
     pub(super) me_adaptive_floor_max_extra_writers_single_per_core: AtomicU32,
     pub(super) me_adaptive_floor_max_extra_writers_multi_per_core: AtomicU32,
+    pub(super) me_adaptive_floor_max_active_writers_per_core: AtomicU32,
+    pub(super) me_adaptive_floor_max_warm_writers_per_core: AtomicU32,
+    pub(super) me_adaptive_floor_max_active_writers_global: AtomicU32,
+    pub(super) me_adaptive_floor_max_warm_writers_global: AtomicU32,
     pub(super) me_adaptive_floor_cpu_cores_detected: AtomicU32,
     pub(super) me_adaptive_floor_cpu_cores_effective: AtomicU32,
     pub(super) me_adaptive_floor_global_cap_raw: AtomicU64,
     pub(super) me_adaptive_floor_global_cap_effective: AtomicU64,
     pub(super) me_adaptive_floor_target_writers_total: AtomicU64,
+    pub(super) me_adaptive_floor_active_cap_configured: AtomicU64,
+    pub(super) me_adaptive_floor_active_cap_effective: AtomicU64,
+    pub(super) me_adaptive_floor_warm_cap_configured: AtomicU64,
+    pub(super) me_adaptive_floor_warm_cap_effective: AtomicU64,
+    pub(super) me_adaptive_floor_active_writers_current: AtomicU64,
+    pub(super) me_adaptive_floor_warm_writers_current: AtomicU64,
     pub(super) proxy_map_v4: Arc<RwLock<HashMap<i32, Vec<(IpAddr, u16)>>>>,
     pub(super) proxy_map_v6: Arc<RwLock<HashMap<i32, Vec<(IpAddr, u16)>>>>,
     pub(super) endpoint_dc_map: Arc<RwLock<HashMap<SocketAddr, Option<i32>>>>,
@@ -243,6 +253,10 @@ impl MePool {
         me_adaptive_floor_cpu_cores_override: u16,
         me_adaptive_floor_max_extra_writers_single_per_core: u16,
         me_adaptive_floor_max_extra_writers_multi_per_core: u16,
+        me_adaptive_floor_max_active_writers_per_core: u16,
+        me_adaptive_floor_max_warm_writers_per_core: u16,
+        me_adaptive_floor_max_active_writers_global: u32,
+        me_adaptive_floor_max_warm_writers_global: u32,
         hardswap: bool,
         me_pool_drain_ttl_secs: u64,
         me_pool_force_close_secs: u64,
@@ -358,11 +372,29 @@ impl MePool {
             me_adaptive_floor_max_extra_writers_multi_per_core: AtomicU32::new(
                 me_adaptive_floor_max_extra_writers_multi_per_core as u32,
             ),
+            me_adaptive_floor_max_active_writers_per_core: AtomicU32::new(
+                me_adaptive_floor_max_active_writers_per_core as u32,
+            ),
+            me_adaptive_floor_max_warm_writers_per_core: AtomicU32::new(
+                me_adaptive_floor_max_warm_writers_per_core as u32,
+            ),
+            me_adaptive_floor_max_active_writers_global: AtomicU32::new(
+                me_adaptive_floor_max_active_writers_global,
+            ),
+            me_adaptive_floor_max_warm_writers_global: AtomicU32::new(
+                me_adaptive_floor_max_warm_writers_global,
+            ),
             me_adaptive_floor_cpu_cores_detected: AtomicU32::new(1),
             me_adaptive_floor_cpu_cores_effective: AtomicU32::new(1),
             me_adaptive_floor_global_cap_raw: AtomicU64::new(0),
             me_adaptive_floor_global_cap_effective: AtomicU64::new(0),
             me_adaptive_floor_target_writers_total: AtomicU64::new(0),
+            me_adaptive_floor_active_cap_configured: AtomicU64::new(0),
+            me_adaptive_floor_active_cap_effective: AtomicU64::new(0),
+            me_adaptive_floor_warm_cap_configured: AtomicU64::new(0),
+            me_adaptive_floor_warm_cap_effective: AtomicU64::new(0),
+            me_adaptive_floor_active_writers_current: AtomicU64::new(0),
+            me_adaptive_floor_warm_writers_current: AtomicU64::new(0),
             pool_size: 2,
             proxy_map_v4: Arc::new(RwLock::new(proxy_map_v4)),
             proxy_map_v6: Arc::new(RwLock::new(proxy_map_v6)),
@@ -453,6 +485,10 @@ impl MePool {
         adaptive_floor_cpu_cores_override: u16,
         adaptive_floor_max_extra_writers_single_per_core: u16,
         adaptive_floor_max_extra_writers_multi_per_core: u16,
+        adaptive_floor_max_active_writers_per_core: u16,
+        adaptive_floor_max_warm_writers_per_core: u16,
+        adaptive_floor_max_active_writers_global: u32,
+        adaptive_floor_max_warm_writers_global: u32,
     ) {
         self.hardswap.store(hardswap, Ordering::Relaxed);
         self.me_pool_drain_ttl_secs
@@ -514,6 +550,20 @@ impl MePool {
                 adaptive_floor_max_extra_writers_multi_per_core as u32,
                 Ordering::Relaxed,
             );
+        self.me_adaptive_floor_max_active_writers_per_core
+            .store(
+                adaptive_floor_max_active_writers_per_core as u32,
+                Ordering::Relaxed,
+            );
+        self.me_adaptive_floor_max_warm_writers_per_core
+            .store(
+                adaptive_floor_max_warm_writers_per_core as u32,
+                Ordering::Relaxed,
+            );
+        self.me_adaptive_floor_max_active_writers_global
+            .store(adaptive_floor_max_active_writers_global, Ordering::Relaxed);
+        self.me_adaptive_floor_max_warm_writers_global
+            .store(adaptive_floor_max_warm_writers_global, Ordering::Relaxed);
         if previous_floor_mode != floor_mode {
             self.stats.increment_me_floor_mode_switch_total();
             match (previous_floor_mode, floor_mode) {
@@ -584,11 +634,26 @@ impl MePool {
         self.proxy_secret.read().await.key_selector
     }
 
-    pub(super) async fn active_writer_count_total(&self) -> usize {
+    pub(super) async fn non_draining_writer_counts_by_contour(&self) -> (usize, usize, usize) {
         let ws = self.writers.read().await;
-        ws.iter()
-            .filter(|w| !w.draining.load(Ordering::Relaxed))
-            .count()
+        let mut active = 0usize;
+        let mut warm = 0usize;
+        for writer in ws.iter() {
+            if writer.draining.load(Ordering::Relaxed) {
+                continue;
+            }
+            match WriterContour::from_u8(writer.contour.load(Ordering::Relaxed)) {
+                WriterContour::Active => active = active.saturating_add(1),
+                WriterContour::Warm => warm = warm.saturating_add(1),
+                WriterContour::Draining => {}
+            }
+        }
+        (active, warm, active.saturating_add(warm))
+    }
+
+    pub(super) async fn active_contour_writer_count_total(&self) -> usize {
+        let (active, _, _) = self.non_draining_writer_counts_by_contour().await;
+        active
     }
 
     pub(super) async fn secret_snapshot(&self) -> SecretSnapshot {
@@ -634,13 +699,6 @@ impl MePool {
             .max(1)
     }
 
-    pub(super) fn adaptive_floor_writers_per_core_total(&self) -> usize {
-        (self
-            .me_adaptive_floor_writers_per_core_total
-            .load(Ordering::Relaxed) as usize)
-            .max(1)
-    }
-
     pub(super) fn adaptive_floor_max_extra_single_per_core(&self) -> usize {
         self.me_adaptive_floor_max_extra_writers_single_per_core
             .load(Ordering::Relaxed) as usize
@@ -649,6 +707,34 @@ impl MePool {
     pub(super) fn adaptive_floor_max_extra_multi_per_core(&self) -> usize {
         self.me_adaptive_floor_max_extra_writers_multi_per_core
             .load(Ordering::Relaxed) as usize
+    }
+
+    pub(super) fn adaptive_floor_max_active_writers_per_core(&self) -> usize {
+        (self
+            .me_adaptive_floor_max_active_writers_per_core
+            .load(Ordering::Relaxed) as usize)
+            .max(1)
+    }
+
+    pub(super) fn adaptive_floor_max_warm_writers_per_core(&self) -> usize {
+        (self
+            .me_adaptive_floor_max_warm_writers_per_core
+            .load(Ordering::Relaxed) as usize)
+            .max(1)
+    }
+
+    pub(super) fn adaptive_floor_max_active_writers_global(&self) -> usize {
+        (self
+            .me_adaptive_floor_max_active_writers_global
+            .load(Ordering::Relaxed) as usize)
+            .max(1)
+    }
+
+    pub(super) fn adaptive_floor_max_warm_writers_global(&self) -> usize {
+        (self
+            .me_adaptive_floor_max_warm_writers_global
+            .load(Ordering::Relaxed) as usize)
+            .max(1)
     }
 
     pub(super) fn adaptive_floor_detected_cpu_cores(&self) -> usize {
@@ -679,28 +765,126 @@ impl MePool {
         effective
     }
 
-    pub(super) fn adaptive_floor_global_cap_raw(&self) -> usize {
+    pub(super) fn adaptive_floor_active_cap_configured_total(&self) -> usize {
         let cores = self.adaptive_floor_effective_cpu_cores();
-        let cap = cores.saturating_mul(self.adaptive_floor_writers_per_core_total());
-        self.me_adaptive_floor_global_cap_raw
-            .store(cap as u64, Ordering::Relaxed);
-        self.stats.set_me_floor_global_cap_raw_gauge(cap as u64);
-        cap
+        let per_core_cap = cores.saturating_mul(self.adaptive_floor_max_active_writers_per_core());
+        let configured = per_core_cap.min(self.adaptive_floor_max_active_writers_global());
+        self.me_adaptive_floor_active_cap_configured
+            .store(configured as u64, Ordering::Relaxed);
+        self.stats
+            .set_me_floor_active_cap_configured_gauge(configured as u64);
+        configured
+    }
+
+    pub(super) fn adaptive_floor_warm_cap_configured_total(&self) -> usize {
+        let cores = self.adaptive_floor_effective_cpu_cores();
+        let per_core_cap = cores.saturating_mul(self.adaptive_floor_max_warm_writers_per_core());
+        let configured = per_core_cap.min(self.adaptive_floor_max_warm_writers_global());
+        self.me_adaptive_floor_warm_cap_configured
+            .store(configured as u64, Ordering::Relaxed);
+        self.stats
+            .set_me_floor_warm_cap_configured_gauge(configured as u64);
+        configured
     }
 
     pub(super) fn set_adaptive_floor_runtime_caps(
         &self,
-        global_cap_effective: usize,
+        active_cap_configured: usize,
+        active_cap_effective: usize,
+        warm_cap_configured: usize,
+        warm_cap_effective: usize,
         target_writers_total: usize,
+        active_writers_current: usize,
+        warm_writers_current: usize,
     ) {
+        self.me_adaptive_floor_global_cap_raw
+            .store(active_cap_configured as u64, Ordering::Relaxed);
         self.me_adaptive_floor_global_cap_effective
-            .store(global_cap_effective as u64, Ordering::Relaxed);
+            .store(active_cap_effective as u64, Ordering::Relaxed);
         self.me_adaptive_floor_target_writers_total
             .store(target_writers_total as u64, Ordering::Relaxed);
+        self.me_adaptive_floor_active_cap_configured
+            .store(active_cap_configured as u64, Ordering::Relaxed);
+        self.me_adaptive_floor_active_cap_effective
+            .store(active_cap_effective as u64, Ordering::Relaxed);
+        self.me_adaptive_floor_warm_cap_configured
+            .store(warm_cap_configured as u64, Ordering::Relaxed);
+        self.me_adaptive_floor_warm_cap_effective
+            .store(warm_cap_effective as u64, Ordering::Relaxed);
+        self.me_adaptive_floor_active_writers_current
+            .store(active_writers_current as u64, Ordering::Relaxed);
+        self.me_adaptive_floor_warm_writers_current
+            .store(warm_writers_current as u64, Ordering::Relaxed);
         self.stats
-            .set_me_floor_global_cap_effective_gauge(global_cap_effective as u64);
+            .set_me_floor_global_cap_raw_gauge(active_cap_configured as u64);
+        self.stats
+            .set_me_floor_global_cap_effective_gauge(active_cap_effective as u64);
         self.stats
             .set_me_floor_target_writers_total_gauge(target_writers_total as u64);
+        self.stats
+            .set_me_floor_active_cap_configured_gauge(active_cap_configured as u64);
+        self.stats
+            .set_me_floor_active_cap_effective_gauge(active_cap_effective as u64);
+        self.stats
+            .set_me_floor_warm_cap_configured_gauge(warm_cap_configured as u64);
+        self.stats
+            .set_me_floor_warm_cap_effective_gauge(warm_cap_effective as u64);
+        self.stats
+            .set_me_writers_active_current_gauge(active_writers_current as u64);
+        self.stats
+            .set_me_writers_warm_current_gauge(warm_writers_current as u64);
+    }
+
+    pub(super) async fn active_coverage_required_total(&self) -> usize {
+        let mut endpoints_by_dc = HashMap::<i32, HashSet<SocketAddr>>::new();
+
+        if self.decision.ipv4_me {
+            let map = self.proxy_map_v4.read().await;
+            for (dc, addrs) in map.iter() {
+                let entry = endpoints_by_dc.entry(*dc).or_default();
+                for (ip, port) in addrs.iter().copied() {
+                    entry.insert(SocketAddr::new(ip, port));
+                }
+            }
+        }
+
+        if self.decision.ipv6_me {
+            let map = self.proxy_map_v6.read().await;
+            for (dc, addrs) in map.iter() {
+                let entry = endpoints_by_dc.entry(*dc).or_default();
+                for (ip, port) in addrs.iter().copied() {
+                    entry.insert(SocketAddr::new(ip, port));
+                }
+            }
+        }
+
+        endpoints_by_dc
+            .values()
+            .map(|endpoints| self.required_writers_for_dc_with_floor_mode(endpoints.len(), false))
+            .sum()
+    }
+
+    pub(super) async fn can_open_writer_for_contour(
+        &self,
+        contour: WriterContour,
+        allow_coverage_override: bool,
+    ) -> bool {
+        let (active_writers, warm_writers, _) = self.non_draining_writer_counts_by_contour().await;
+        match contour {
+            WriterContour::Active => {
+                let active_cap = self.adaptive_floor_active_cap_configured_total();
+                if active_writers < active_cap {
+                    return true;
+                }
+                if !allow_coverage_override {
+                    return false;
+                }
+                let coverage_required = self.active_coverage_required_total().await;
+                active_writers < coverage_required
+            }
+            WriterContour::Warm => warm_writers < self.adaptive_floor_warm_cap_configured_total(),
+            WriterContour::Draining => true,
+        }
     }
 
     pub(super) fn required_writers_for_dc_with_floor_mode(

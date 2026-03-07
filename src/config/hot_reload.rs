@@ -84,6 +84,10 @@ pub struct HotFields {
     pub me_adaptive_floor_cpu_cores_override: u16,
     pub me_adaptive_floor_max_extra_writers_single_per_core: u16,
     pub me_adaptive_floor_max_extra_writers_multi_per_core: u16,
+    pub me_adaptive_floor_max_active_writers_per_core: u16,
+    pub me_adaptive_floor_max_warm_writers_per_core: u16,
+    pub me_adaptive_floor_max_active_writers_global: u32,
+    pub me_adaptive_floor_max_warm_writers_global: u32,
     pub me_route_backpressure_base_timeout_ms: u64,
     pub me_route_backpressure_high_timeout_ms: u64,
     pub me_route_backpressure_high_watermark_pct: u8,
@@ -173,6 +177,18 @@ impl HotFields {
             me_adaptive_floor_max_extra_writers_multi_per_core: cfg
                 .general
                 .me_adaptive_floor_max_extra_writers_multi_per_core,
+            me_adaptive_floor_max_active_writers_per_core: cfg
+                .general
+                .me_adaptive_floor_max_active_writers_per_core,
+            me_adaptive_floor_max_warm_writers_per_core: cfg
+                .general
+                .me_adaptive_floor_max_warm_writers_per_core,
+            me_adaptive_floor_max_active_writers_global: cfg
+                .general
+                .me_adaptive_floor_max_active_writers_global,
+            me_adaptive_floor_max_warm_writers_global: cfg
+                .general
+                .me_adaptive_floor_max_warm_writers_global,
             me_route_backpressure_base_timeout_ms: cfg.general.me_route_backpressure_base_timeout_ms,
             me_route_backpressure_high_timeout_ms: cfg.general.me_route_backpressure_high_timeout_ms,
             me_route_backpressure_high_watermark_pct: cfg.general.me_route_backpressure_high_watermark_pct,
@@ -305,6 +321,14 @@ fn overlay_hot_fields(old: &ProxyConfig, new: &ProxyConfig) -> ProxyConfig {
         new.general.me_adaptive_floor_max_extra_writers_single_per_core;
     cfg.general.me_adaptive_floor_max_extra_writers_multi_per_core =
         new.general.me_adaptive_floor_max_extra_writers_multi_per_core;
+    cfg.general.me_adaptive_floor_max_active_writers_per_core =
+        new.general.me_adaptive_floor_max_active_writers_per_core;
+    cfg.general.me_adaptive_floor_max_warm_writers_per_core =
+        new.general.me_adaptive_floor_max_warm_writers_per_core;
+    cfg.general.me_adaptive_floor_max_active_writers_global =
+        new.general.me_adaptive_floor_max_active_writers_global;
+    cfg.general.me_adaptive_floor_max_warm_writers_global =
+        new.general.me_adaptive_floor_max_warm_writers_global;
     cfg.general.me_route_backpressure_base_timeout_ms =
         new.general.me_route_backpressure_base_timeout_ms;
     cfg.general.me_route_backpressure_high_timeout_ms =
@@ -739,9 +763,17 @@ fn log_changes(
             != new_hot.me_adaptive_floor_max_extra_writers_single_per_core
         || old_hot.me_adaptive_floor_max_extra_writers_multi_per_core
             != new_hot.me_adaptive_floor_max_extra_writers_multi_per_core
+        || old_hot.me_adaptive_floor_max_active_writers_per_core
+            != new_hot.me_adaptive_floor_max_active_writers_per_core
+        || old_hot.me_adaptive_floor_max_warm_writers_per_core
+            != new_hot.me_adaptive_floor_max_warm_writers_per_core
+        || old_hot.me_adaptive_floor_max_active_writers_global
+            != new_hot.me_adaptive_floor_max_active_writers_global
+        || old_hot.me_adaptive_floor_max_warm_writers_global
+            != new_hot.me_adaptive_floor_max_warm_writers_global
     {
         info!(
-            "config reload: me_floor: mode={:?} idle={}s min_single={} min_multi={} recover_grace={}s per_core_total={} cores_override={} extra_single_per_core={} extra_multi_per_core={}",
+            "config reload: me_floor: mode={:?} idle={}s min_single={} min_multi={} recover_grace={}s per_core_total={} cores_override={} extra_single_per_core={} extra_multi_per_core={} max_active_per_core={} max_warm_per_core={} max_active_global={} max_warm_global={}",
             new_hot.me_floor_mode,
             new_hot.me_adaptive_floor_idle_secs,
             new_hot.me_adaptive_floor_min_writers_single_endpoint,
@@ -751,6 +783,10 @@ fn log_changes(
             new_hot.me_adaptive_floor_cpu_cores_override,
             new_hot.me_adaptive_floor_max_extra_writers_single_per_core,
             new_hot.me_adaptive_floor_max_extra_writers_multi_per_core,
+            new_hot.me_adaptive_floor_max_active_writers_per_core,
+            new_hot.me_adaptive_floor_max_warm_writers_per_core,
+            new_hot.me_adaptive_floor_max_active_writers_global,
+            new_hot.me_adaptive_floor_max_warm_writers_global,
         );
     }
 

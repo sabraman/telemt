@@ -99,6 +99,7 @@ impl MePool {
             rng,
             self.current_generation(),
             WriterContour::Active,
+            false,
         )
         .await
     }
@@ -110,6 +111,7 @@ impl MePool {
         rng: &SecureRandom,
         generation: u64,
         contour: WriterContour,
+        allow_coverage_override: bool,
     ) -> bool {
         let candidates = self.connectable_endpoints(endpoints).await;
         if candidates.is_empty() {
@@ -120,7 +122,14 @@ impl MePool {
             let idx = (start + offset) % candidates.len();
             let addr = candidates[idx];
             match self
-                .connect_one_with_generation_contour_for_dc(addr, rng, generation, contour, dc)
+                .connect_one_with_generation_contour_for_dc_with_cap_policy(
+                    addr,
+                    rng,
+                    generation,
+                    contour,
+                    dc,
+                    allow_coverage_override,
+                )
                 .await
             {
                 Ok(()) => return true,

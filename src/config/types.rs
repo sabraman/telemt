@@ -545,6 +545,22 @@ pub struct GeneralConfig {
     #[serde(default = "default_me_adaptive_floor_max_extra_writers_multi_per_core")]
     pub me_adaptive_floor_max_extra_writers_multi_per_core: u16,
 
+    /// Hard cap for active ME writers per logical CPU core.
+    #[serde(default = "default_me_adaptive_floor_max_active_writers_per_core")]
+    pub me_adaptive_floor_max_active_writers_per_core: u16,
+
+    /// Hard cap for warm ME writers per logical CPU core.
+    #[serde(default = "default_me_adaptive_floor_max_warm_writers_per_core")]
+    pub me_adaptive_floor_max_warm_writers_per_core: u16,
+
+    /// Hard global cap for active ME writers.
+    #[serde(default = "default_me_adaptive_floor_max_active_writers_global")]
+    pub me_adaptive_floor_max_active_writers_global: u32,
+
+    /// Hard global cap for warm ME writers.
+    #[serde(default = "default_me_adaptive_floor_max_warm_writers_global")]
+    pub me_adaptive_floor_max_warm_writers_global: u32,
+
     /// Connect attempts for the selected upstream before returning error/fallback.
     #[serde(default = "default_upstream_connect_retry_attempts")]
     pub upstream_connect_retry_attempts: u32,
@@ -802,6 +818,10 @@ impl Default for GeneralConfig {
             me_adaptive_floor_cpu_cores_override: default_me_adaptive_floor_cpu_cores_override(),
             me_adaptive_floor_max_extra_writers_single_per_core: default_me_adaptive_floor_max_extra_writers_single_per_core(),
             me_adaptive_floor_max_extra_writers_multi_per_core: default_me_adaptive_floor_max_extra_writers_multi_per_core(),
+            me_adaptive_floor_max_active_writers_per_core: default_me_adaptive_floor_max_active_writers_per_core(),
+            me_adaptive_floor_max_warm_writers_per_core: default_me_adaptive_floor_max_warm_writers_per_core(),
+            me_adaptive_floor_max_active_writers_global: default_me_adaptive_floor_max_active_writers_global(),
+            me_adaptive_floor_max_warm_writers_global: default_me_adaptive_floor_max_warm_writers_global(),
             upstream_connect_retry_attempts: default_upstream_connect_retry_attempts(),
             upstream_connect_retry_backoff_ms: default_upstream_connect_retry_backoff_ms(),
             upstream_connect_budget_ms: default_upstream_connect_budget_ms(),

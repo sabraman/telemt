@@ -86,6 +86,35 @@ impl MePool {
         contour: WriterContour,
         writer_dc: i32,
     ) -> Result<()> {
+        self.connect_one_with_generation_contour_for_dc_with_cap_policy(
+            addr,
+            rng,
+            generation,
+            contour,
+            writer_dc,
+            false,
+        )
+        .await
+    }
+
+    pub(super) async fn connect_one_with_generation_contour_for_dc_with_cap_policy(
+        self: &Arc<Self>,
+        addr: SocketAddr,
+        rng: &SecureRandom,
+        generation: u64,
+        contour: WriterContour,
+        writer_dc: i32,
+        allow_coverage_override: bool,
+    ) -> Result<()> {
+        if !self
+            .can_open_writer_for_contour(contour, allow_coverage_override)
+            .await
+        {
+            return Err(ProxyError::Proxy(format!(
+                "ME {contour:?} writer cap reached"
+            )));
+        }
+
         let secret_len = self.proxy_secret.read().await.secret.len();
         if secret_len < 32 {
             return Err(ProxyError::Proxy("proxy-secret too short for ME auth".into()));

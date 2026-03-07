@@ -70,6 +70,10 @@ pub(super) struct EffectiveMiddleProxyLimits {
     pub(super) adaptive_floor_cpu_cores_override: u16,
     pub(super) adaptive_floor_max_extra_writers_single_per_core: u16,
     pub(super) adaptive_floor_max_extra_writers_multi_per_core: u16,
+    pub(super) adaptive_floor_max_active_writers_per_core: u16,
+    pub(super) adaptive_floor_max_warm_writers_per_core: u16,
+    pub(super) adaptive_floor_max_active_writers_global: u32,
+    pub(super) adaptive_floor_max_warm_writers_global: u32,
     pub(super) reconnect_max_concurrent_per_dc: u32,
     pub(super) reconnect_backoff_base_ms: u64,
     pub(super) reconnect_backoff_cap_ms: u64,
@@ -217,6 +221,18 @@ pub(super) fn build_limits_effective_data(cfg: &ProxyConfig) -> EffectiveLimitsD
             adaptive_floor_max_extra_writers_multi_per_core: cfg
                 .general
                 .me_adaptive_floor_max_extra_writers_multi_per_core,
+            adaptive_floor_max_active_writers_per_core: cfg
+                .general
+                .me_adaptive_floor_max_active_writers_per_core,
+            adaptive_floor_max_warm_writers_per_core: cfg
+                .general
+                .me_adaptive_floor_max_warm_writers_per_core,
+            adaptive_floor_max_active_writers_global: cfg
+                .general
+                .me_adaptive_floor_max_active_writers_global,
+            adaptive_floor_max_warm_writers_global: cfg
+                .general
+                .me_adaptive_floor_max_warm_writers_global,
             reconnect_max_concurrent_per_dc: cfg.general.me_reconnect_max_concurrent_per_dc,
             reconnect_backoff_base_ms: cfg.general.me_reconnect_backoff_base_ms,
             reconnect_backoff_cap_ms: cfg.general.me_reconnect_backoff_cap_ms,

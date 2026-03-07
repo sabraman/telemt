@@ -327,6 +327,30 @@ impl ProxyConfig {
             ));
         }
 
+        if config.general.me_adaptive_floor_max_active_writers_per_core == 0 {
+            return Err(ProxyError::Config(
+                "general.me_adaptive_floor_max_active_writers_per_core must be > 0".to_string(),
+            ));
+        }
+
+        if config.general.me_adaptive_floor_max_warm_writers_per_core == 0 {
+            return Err(ProxyError::Config(
+                "general.me_adaptive_floor_max_warm_writers_per_core must be > 0".to_string(),
+            ));
+        }
+
+        if config.general.me_adaptive_floor_max_active_writers_global == 0 {
+            return Err(ProxyError::Config(
+                "general.me_adaptive_floor_max_active_writers_global must be > 0".to_string(),
+            ));
+        }
+
+        if config.general.me_adaptive_floor_max_warm_writers_global == 0 {
+            return Err(ProxyError::Config(
+                "general.me_adaptive_floor_max_warm_writers_global must be > 0".to_string(),
+            ));
+        }
+
         if config.general.me_single_endpoint_outage_backoff_min_ms == 0 {
             return Err(ProxyError::Config(
                 "general.me_single_endpoint_outage_backoff_min_ms must be > 0".to_string(),
@@ -1235,6 +1259,46 @@ mod tests {
         std::fs::write(&path, toml).unwrap();
         let cfg = ProxyConfig::load(&path).unwrap();
         assert_eq!(cfg.general.me_floor_mode, MeFloorMode::Adaptive);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn me_adaptive_floor_max_active_writers_per_core_zero_is_rejected() {
+        let toml = r#"
+            [general]
+            me_adaptive_floor_max_active_writers_per_core = 0
+
+            [censorship]
+            tls_domain = "example.com"
+
+            [access.users]
+            user = "00000000000000000000000000000000"
+        "#;
+        let dir = std::env::temp_dir();
+        let path = dir.join("telemt_me_adaptive_floor_max_active_per_core_zero_test.toml");
+        std::fs::write(&path, toml).unwrap();
+        let err = ProxyConfig::load(&path).unwrap_err().to_string();
+        assert!(err.contains("general.me_adaptive_floor_max_active_writers_per_core must be > 0"));
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn me_adaptive_floor_max_warm_writers_global_zero_is_rejected() {
+        let toml = r#"
+            [general]
+            me_adaptive_floor_max_warm_writers_global = 0
+
+            [censorship]
+            tls_domain = "example.com"
+
+            [access.users]
+            user = "00000000000000000000000000000000"
+        "#;
+        let dir = std::env::temp_dir();
+        let path = dir.join("telemt_me_adaptive_floor_max_warm_global_zero_test.toml");
+        std::fs::write(&path, toml).unwrap();
+        let err = ProxyConfig::load(&path).unwrap_err().to_string();
+        assert!(err.contains("general.me_adaptive_floor_max_warm_writers_global must be > 0"));
         let _ = std::fs::remove_file(path);
     }
 

@@ -17,6 +17,10 @@ const DEFAULT_ME_ADAPTIVE_FLOOR_WRITERS_PER_CORE_TOTAL: u16 = 48;
 const DEFAULT_ME_ADAPTIVE_FLOOR_CPU_CORES_OVERRIDE: u16 = 0;
 const DEFAULT_ME_ADAPTIVE_FLOOR_MAX_EXTRA_WRITERS_SINGLE_PER_CORE: u16 = 1;
 const DEFAULT_ME_ADAPTIVE_FLOOR_MAX_EXTRA_WRITERS_MULTI_PER_CORE: u16 = 2;
+const DEFAULT_ME_ADAPTIVE_FLOOR_MAX_ACTIVE_WRITERS_PER_CORE: u16 = 64;
+const DEFAULT_ME_ADAPTIVE_FLOOR_MAX_WARM_WRITERS_PER_CORE: u16 = 64;
+const DEFAULT_ME_ADAPTIVE_FLOOR_MAX_ACTIVE_WRITERS_GLOBAL: u32 = 256;
+const DEFAULT_ME_ADAPTIVE_FLOOR_MAX_WARM_WRITERS_GLOBAL: u32 = 256;
 const DEFAULT_USER_MAX_UNIQUE_IPS_WINDOW_SECS: u64 = 30;
 const DEFAULT_UPSTREAM_CONNECT_RETRY_ATTEMPTS: u32 = 2;
 const DEFAULT_UPSTREAM_UNHEALTHY_FAIL_THRESHOLD: u32 = 5;
@@ -274,6 +278,22 @@ pub(crate) fn default_me_adaptive_floor_max_extra_writers_single_per_core() -> u
 
 pub(crate) fn default_me_adaptive_floor_max_extra_writers_multi_per_core() -> u16 {
     DEFAULT_ME_ADAPTIVE_FLOOR_MAX_EXTRA_WRITERS_MULTI_PER_CORE
+}
+
+pub(crate) fn default_me_adaptive_floor_max_active_writers_per_core() -> u16 {
+    DEFAULT_ME_ADAPTIVE_FLOOR_MAX_ACTIVE_WRITERS_PER_CORE
+}
+
+pub(crate) fn default_me_adaptive_floor_max_warm_writers_per_core() -> u16 {
+    DEFAULT_ME_ADAPTIVE_FLOOR_MAX_WARM_WRITERS_PER_CORE
+}
+
+pub(crate) fn default_me_adaptive_floor_max_active_writers_global() -> u32 {
+    DEFAULT_ME_ADAPTIVE_FLOOR_MAX_ACTIVE_WRITERS_GLOBAL
+}
+
+pub(crate) fn default_me_adaptive_floor_max_warm_writers_global() -> u32 {
+    DEFAULT_ME_ADAPTIVE_FLOOR_MAX_WARM_WRITERS_GLOBAL
 }
 
 pub(crate) fn default_upstream_connect_retry_attempts() -> u32 {

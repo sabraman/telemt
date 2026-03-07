@@ -80,6 +80,12 @@ pub struct Stats {
     me_floor_global_cap_raw_gauge: AtomicU64,
     me_floor_global_cap_effective_gauge: AtomicU64,
     me_floor_target_writers_total_gauge: AtomicU64,
+    me_floor_active_cap_configured_gauge: AtomicU64,
+    me_floor_active_cap_effective_gauge: AtomicU64,
+    me_floor_warm_cap_configured_gauge: AtomicU64,
+    me_floor_warm_cap_effective_gauge: AtomicU64,
+    me_writers_active_current_gauge: AtomicU64,
+    me_writers_warm_current_gauge: AtomicU64,
     me_floor_cap_block_total: AtomicU64,
     me_floor_swap_idle_total: AtomicU64,
     me_floor_swap_idle_failed_total: AtomicU64,
@@ -764,6 +770,42 @@ impl Stats {
                 .store(value, Ordering::Relaxed);
         }
     }
+    pub fn set_me_floor_active_cap_configured_gauge(&self, value: u64) {
+        if self.telemetry_me_allows_normal() {
+            self.me_floor_active_cap_configured_gauge
+                .store(value, Ordering::Relaxed);
+        }
+    }
+    pub fn set_me_floor_active_cap_effective_gauge(&self, value: u64) {
+        if self.telemetry_me_allows_normal() {
+            self.me_floor_active_cap_effective_gauge
+                .store(value, Ordering::Relaxed);
+        }
+    }
+    pub fn set_me_floor_warm_cap_configured_gauge(&self, value: u64) {
+        if self.telemetry_me_allows_normal() {
+            self.me_floor_warm_cap_configured_gauge
+                .store(value, Ordering::Relaxed);
+        }
+    }
+    pub fn set_me_floor_warm_cap_effective_gauge(&self, value: u64) {
+        if self.telemetry_me_allows_normal() {
+            self.me_floor_warm_cap_effective_gauge
+                .store(value, Ordering::Relaxed);
+        }
+    }
+    pub fn set_me_writers_active_current_gauge(&self, value: u64) {
+        if self.telemetry_me_allows_normal() {
+            self.me_writers_active_current_gauge
+                .store(value, Ordering::Relaxed);
+        }
+    }
+    pub fn set_me_writers_warm_current_gauge(&self, value: u64) {
+        if self.telemetry_me_allows_normal() {
+            self.me_writers_warm_current_gauge
+                .store(value, Ordering::Relaxed);
+        }
+    }
     pub fn increment_me_floor_cap_block_total(&self) {
         if self.telemetry_me_allows_normal() {
             self.me_floor_cap_block_total.fetch_add(1, Ordering::Relaxed);
@@ -902,6 +944,30 @@ impl Stats {
     }
     pub fn get_me_floor_target_writers_total_gauge(&self) -> u64 {
         self.me_floor_target_writers_total_gauge
+            .load(Ordering::Relaxed)
+    }
+    pub fn get_me_floor_active_cap_configured_gauge(&self) -> u64 {
+        self.me_floor_active_cap_configured_gauge
+            .load(Ordering::Relaxed)
+    }
+    pub fn get_me_floor_active_cap_effective_gauge(&self) -> u64 {
+        self.me_floor_active_cap_effective_gauge
+            .load(Ordering::Relaxed)
+    }
+    pub fn get_me_floor_warm_cap_configured_gauge(&self) -> u64 {
+        self.me_floor_warm_cap_configured_gauge
+            .load(Ordering::Relaxed)
+    }
+    pub fn get_me_floor_warm_cap_effective_gauge(&self) -> u64 {
+        self.me_floor_warm_cap_effective_gauge
+            .load(Ordering::Relaxed)
+    }
+    pub fn get_me_writers_active_current_gauge(&self) -> u64 {
+        self.me_writers_active_current_gauge
+            .load(Ordering::Relaxed)
+    }
+    pub fn get_me_writers_warm_current_gauge(&self) -> u64 {
+        self.me_writers_warm_current_gauge
             .load(Ordering::Relaxed)
     }
     pub fn get_me_floor_cap_block_total(&self) -> u64 {

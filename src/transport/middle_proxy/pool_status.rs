@@ -82,11 +82,21 @@ pub(crate) struct MeApiRuntimeSnapshot {
     pub adaptive_floor_cpu_cores_override: u16,
     pub adaptive_floor_max_extra_writers_single_per_core: u16,
     pub adaptive_floor_max_extra_writers_multi_per_core: u16,
+    pub adaptive_floor_max_active_writers_per_core: u16,
+    pub adaptive_floor_max_warm_writers_per_core: u16,
+    pub adaptive_floor_max_active_writers_global: u32,
+    pub adaptive_floor_max_warm_writers_global: u32,
     pub adaptive_floor_cpu_cores_detected: u32,
     pub adaptive_floor_cpu_cores_effective: u32,
     pub adaptive_floor_global_cap_raw: u64,
     pub adaptive_floor_global_cap_effective: u64,
     pub adaptive_floor_target_writers_total: u64,
+    pub adaptive_floor_active_cap_configured: u64,
+    pub adaptive_floor_active_cap_effective: u64,
+    pub adaptive_floor_warm_cap_configured: u64,
+    pub adaptive_floor_warm_cap_effective: u64,
+    pub adaptive_floor_active_writers_current: u64,
+    pub adaptive_floor_warm_writers_current: u64,
     pub me_keepalive_enabled: bool,
     pub me_keepalive_interval_secs: u64,
     pub me_keepalive_jitter_secs: u64,
@@ -430,6 +440,18 @@ impl MePool {
             adaptive_floor_max_extra_writers_multi_per_core: self
                 .me_adaptive_floor_max_extra_writers_multi_per_core
                 .load(Ordering::Relaxed) as u16,
+            adaptive_floor_max_active_writers_per_core: self
+                .me_adaptive_floor_max_active_writers_per_core
+                .load(Ordering::Relaxed) as u16,
+            adaptive_floor_max_warm_writers_per_core: self
+                .me_adaptive_floor_max_warm_writers_per_core
+                .load(Ordering::Relaxed) as u16,
+            adaptive_floor_max_active_writers_global: self
+                .me_adaptive_floor_max_active_writers_global
+                .load(Ordering::Relaxed),
+            adaptive_floor_max_warm_writers_global: self
+                .me_adaptive_floor_max_warm_writers_global
+                .load(Ordering::Relaxed),
             adaptive_floor_cpu_cores_detected: self
                 .me_adaptive_floor_cpu_cores_detected
                 .load(Ordering::Relaxed),
@@ -444,6 +466,24 @@ impl MePool {
                 .load(Ordering::Relaxed),
             adaptive_floor_target_writers_total: self
                 .me_adaptive_floor_target_writers_total
+                .load(Ordering::Relaxed),
+            adaptive_floor_active_cap_configured: self
+                .me_adaptive_floor_active_cap_configured
+                .load(Ordering::Relaxed),
+            adaptive_floor_active_cap_effective: self
+                .me_adaptive_floor_active_cap_effective
+                .load(Ordering::Relaxed),
+            adaptive_floor_warm_cap_configured: self
+                .me_adaptive_floor_warm_cap_configured
+                .load(Ordering::Relaxed),
+            adaptive_floor_warm_cap_effective: self
+                .me_adaptive_floor_warm_cap_effective
+                .load(Ordering::Relaxed),
+            adaptive_floor_active_writers_current: self
+                .me_adaptive_floor_active_writers_current
+                .load(Ordering::Relaxed),
+            adaptive_floor_warm_writers_current: self
+                .me_adaptive_floor_warm_writers_current
                 .load(Ordering::Relaxed),
             me_keepalive_enabled: self.me_keepalive_enabled,
             me_keepalive_interval_secs: self.me_keepalive_interval.as_secs(),
