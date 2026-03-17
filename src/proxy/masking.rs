@@ -24,7 +24,35 @@ const MASK_TIMEOUT: Duration = Duration::from_millis(50);
 const MASK_RELAY_TIMEOUT: Duration = Duration::from_secs(60);
 #[cfg(test)]
 const MASK_RELAY_TIMEOUT: Duration = Duration::from_millis(200);
+#[cfg(not(test))]
+const MASK_RELAY_IDLE_TIMEOUT: Duration = Duration::from_secs(5);
+#[cfg(test)]
+const MASK_RELAY_IDLE_TIMEOUT: Duration = Duration::from_millis(100);
 const MASK_BUFFER_SIZE: usize = 8192;
+
+async fn copy_with_idle_timeout<R, W>(reader: &mut R, writer: &mut W)
+where
+    R: AsyncRead + Unpin,
+    W: AsyncWrite + Unpin,
+{
+    let mut buf = vec![0u8; MASK_BUFFER_SIZE];
+    loop {
+        let read_res = timeout(MASK_RELAY_IDLE_TIMEOUT, reader.read(&mut buf)).await;
+        let n = match read_res {
+            Ok(Ok(n)) => n,
+            Ok(Err(_)) | Err(_) => break,
+        };
+        if n == 0 {
+            break;
+        }
+
+        let write_res = timeout(MASK_RELAY_IDLE_TIMEOUT, writer.write_all(&buf[..n])).await;
+        match write_res {
+            Ok(Ok(())) => {}
+            Ok(Err(_)) | Err(_) => break,
+        }
+    }
+}
 
 async fn write_proxy_header_with_timeout<W>(mask_write: &mut W, header: &[u8]) -> bool
 where
@@ -264,11 +292,11 @@ where
 
     let _ = tokio::join!(
         async {
-            let _ = tokio::io::copy(&mut reader, &mut mask_write).await;
+            copy_with_idle_timeout(&mut reader, &mut mask_write).await;
             let _ = mask_write.shutdown().await;
         },
         async {
-            let _ = tokio::io::copy(&mut mask_read, &mut writer).await;
+            copy_with_idle_timeout(&mut mask_read, &mut writer).await;
             let _ = writer.shutdown().await;
         }
     );

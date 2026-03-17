@@ -1394,3 +1394,111 @@ fn server_hello_application_data_payload_varies_across_runs() {
         "ApplicationData payload should vary across runs to reduce fingerprintability"
     );
 }
+
+#[test]
+fn replay_window_zero_disables_boot_bypass_for_any_nonzero_timestamp() {
+    let secret = b"window_zero_boot_bypass_test";
+    let secrets = vec![("u".to_string(), secret.to_vec())];
+
+    let ts1 = make_valid_tls_handshake(secret, 1);
+    assert!(
+        validate_tls_handshake_with_replay_window(&ts1, &secrets, false, 0).is_none(),
+        "replay_window_secs=0 must reject nonzero timestamps even in boot-time range"
+    );
+
+    let ts0 = make_valid_tls_handshake(secret, 0);
+    assert!(
+        validate_tls_handshake_with_replay_window(&ts0, &secrets, false, 0).is_none(),
+        "replay_window_secs=0 enforces strict skew check and rejects timestamp=0 on normal wall-clock systems"
+    );
+}
+
+#[test]
+fn large_replay_window_does_not_expand_time_skew_acceptance() {
+    let secret = b"large_replay_window_skew_bound_test";
+    let secrets = vec![("u".to_string(), secret.to_vec())];
+    let now: i64 = 1_700_000_000;
+
+    let ts_far_past = (now - 600) as u32;
+    let valid = make_valid_tls_handshake(secret, ts_far_past);
+    assert!(
+        validate_tls_handshake_with_replay_window(&valid, &secrets, false, 86_400).is_none(),
+        "large replay window must not relax strict skew check once boot-time bypass is not in play"
+    );
+}
+
+#[test]
+fn parse_tls_record_header_accepts_tls_version_constant() {
+    let header = [TLS_RECORD_HANDSHAKE, TLS_VERSION[0], TLS_VERSION[1], 0x00, 0x2A];
+    let parsed = parse_tls_record_header(&header).expect("TLS_VERSION header should be accepted");
+    assert_eq!(parsed.0, TLS_RECORD_HANDSHAKE);
+    assert_eq!(parsed.1, 42);
+}
+
+#[test]
+fn server_hello_clamps_fake_cert_len_lower_bound() {
+    let secret = b"fake_cert_lower_bound_test";
+    let client_digest = [0x11u8; TLS_DIGEST_LEN];
+    let session_id = vec![0x77; 32];
+    let rng = crate::crypto::SecureRandom::new();
+
+    let response = build_server_hello(secret, &client_digest, &session_id, 1, &rng, None, 0);
+
+    let sh_len = u16::from_be_bytes([response[3], response[4]]) as usize;
+    let ccs_pos = 5 + sh_len;
+    let ccs_len = u16::from_be_bytes([response[ccs_pos + 3], response[ccs_pos + 4]]) as usize;
+    let app_pos = ccs_pos + 5 + ccs_len;
+    let app_len = u16::from_be_bytes([response[app_pos + 3], response[app_pos + 4]]) as usize;
+
+    assert_eq!(response[app_pos], TLS_RECORD_APPLICATION);
+    assert_eq!(app_len, 64, "fake cert payload must be clamped to minimum 64 bytes");
+}
+
+#[test]
+fn server_hello_clamps_fake_cert_len_upper_bound() {
+    let secret = b"fake_cert_upper_bound_test";
+    let client_digest = [0x22u8; TLS_DIGEST_LEN];
+    let session_id = vec![0x66; 32];
+    let rng = crate::crypto::SecureRandom::new();
+
+    let response = build_server_hello(secret, &client_digest, &session_id, 65_535, &rng, None, 0);
+
+    let sh_len = u16::from_be_bytes([response[3], response[4]]) as usize;
+    let ccs_pos = 5 + sh_len;
+    let ccs_len = u16::from_be_bytes([response[ccs_pos + 3], response[ccs_pos + 4]]) as usize;
+    let app_pos = ccs_pos + 5 + ccs_len;
+    let app_len = u16::from_be_bytes([response[app_pos + 3], response[app_pos + 4]]) as usize;
+
+    assert_eq!(response[app_pos], TLS_RECORD_APPLICATION);
+    assert_eq!(app_len, 16_640, "fake cert payload must be clamped to TLS record max bound");
+}
+
+#[test]
+fn server_hello_new_session_ticket_count_matches_configuration() {
+    let secret = b"ticket_count_surface_test";
+    let client_digest = [0x33u8; TLS_DIGEST_LEN];
+    let session_id = vec![0x55; 32];
+    let rng = crate::crypto::SecureRandom::new();
+
+    let tickets: u8 = 3;
+    let response = build_server_hello(secret, &client_digest, &session_id, 1024, &rng, None, tickets);
+
+    let mut pos = 0usize;
+    let mut app_records = 0usize;
+    while pos + 5 <= response.len() {
+        let rtype = response[pos];
+        let rlen = u16::from_be_bytes([response[pos + 3], response[pos + 4]]) as usize;
+        let next = pos + 5 + rlen;
+        assert!(next <= response.len(), "TLS record must stay inside response bounds");
+        if rtype == TLS_RECORD_APPLICATION {
+            app_records += 1;
+        }
+        pos = next;
+    }
+
+    assert_eq!(
+        app_records,
+        1 + tickets as usize,
+        "response must contain one main application record plus configured ticket-like tail records"
+    );
+}

@@ -27,8 +27,8 @@ pub const TLS_DIGEST_POS: usize = 11;
 pub const TLS_DIGEST_HALF_LEN: usize = 16;
 
 /// Time skew limits for anti-replay (in seconds)
-pub const TIME_SKEW_MIN: i64 = -20 * 60; // 20 minutes before
-pub const TIME_SKEW_MAX: i64 = 10 * 60;  // 10 minutes after
+pub const TIME_SKEW_MIN: i64 = -2 * 60; // 2 minutes before
+pub const TIME_SKEW_MAX: i64 = 2 * 60;  // 2 minutes after
 /// Maximum accepted boot-time timestamp (seconds) before skew checks are enforced.
 pub const BOOT_TIME_MAX_SECS: u32 = 7 * 24 * 60 * 60;
 

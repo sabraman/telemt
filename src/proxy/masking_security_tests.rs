@@ -234,8 +234,9 @@ async fn backend_connect_refusal_waits_mask_connect_budget_before_fallback() {
     let local_addr: SocketAddr = "127.0.0.1:443".parse().unwrap();
     let probe = b"GET /probe HTTP/1.1\r\nHost: x\r\n\r\n";
 
-    // Keep reader open so fallback path does not terminate immediately on EOF.
-    let (_client_reader_side, client_reader) = duplex(256);
+    // Close client reader immediately to force the refusal path to rely on masking budget timing.
+    let (client_reader_side, client_reader) = duplex(256);
+    drop(client_reader_side);
     let (_client_visible_reader, client_visible_writer) = duplex(256);
     let beobachten = BeobachtenStore::new();
 
@@ -890,6 +891,59 @@ async fn mask_disabled_slowloris_connection_is_closed_by_consume_timeout() {
     timeout(Duration::from_secs(1), task).await.unwrap().unwrap();
 }
 
+#[tokio::test]
+async fn mask_enabled_idle_relay_is_closed_by_idle_timeout_before_global_relay_timeout() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let backend_addr = listener.local_addr().unwrap();
+    let probe = b"GET /idle HTTP/1.1\r\nHost: front.example\r\n\r\n".to_vec();
+
+    let accept_task = tokio::spawn({
+        let probe = probe.clone();
+        async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut received = vec![0u8; probe.len()];
+            stream.read_exact(&mut received).await.unwrap();
+            assert_eq!(received, probe);
+            sleep(Duration::from_millis(300)).await;
+        }
+    });
+
+    let mut config = ProxyConfig::default();
+    config.general.beobachten = false;
+    config.censorship.mask = true;
+    config.censorship.mask_host = Some("127.0.0.1".to_string());
+    config.censorship.mask_port = backend_addr.port();
+    config.censorship.mask_unix_sock = None;
+    config.censorship.mask_proxy_protocol = 0;
+
+    let peer: SocketAddr = "198.51.100.34:45456".parse().unwrap();
+    let local_addr: SocketAddr = "127.0.0.1:443".parse().unwrap();
+
+    let (_client_reader_side, client_reader) = duplex(512);
+    let (_client_visible_reader, client_visible_writer) = duplex(512);
+    let beobachten = BeobachtenStore::new();
+
+    let started = Instant::now();
+    handle_bad_client(
+        client_reader,
+        client_visible_writer,
+        &probe,
+        peer,
+        local_addr,
+        &config,
+        &beobachten,
+    )
+    .await;
+
+    let elapsed = started.elapsed();
+    assert!(
+        elapsed < Duration::from_millis(150),
+        "idle unauth relay must terminate on idle timeout instead of waiting for full relay timeout"
+    );
+
+    accept_task.await.unwrap();
+}
+
 struct PendingWriter;
 
 impl tokio::io::AsyncWrite for PendingWriter {
@@ -1249,4 +1303,167 @@ async fn timing_matrix_masking_classes_under_controlled_inputs() {
         reachable_max,
         (reachable_mean as u128) / BUCKET_MS
     );
+}
+
+#[tokio::test]
+async fn backend_connect_refusal_completes_within_bounded_mask_budget() {
+    let temp_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let unused_port = temp_listener.local_addr().unwrap().port();
+    drop(temp_listener);
+
+    let mut config = ProxyConfig::default();
+    config.general.beobachten = false;
+    config.censorship.mask = true;
+    config.censorship.mask_host = Some("127.0.0.1".to_string());
+    config.censorship.mask_port = unused_port;
+    config.censorship.mask_unix_sock = None;
+    config.censorship.mask_proxy_protocol = 0;
+
+    let peer: SocketAddr = "203.0.113.41:51001".parse().unwrap();
+    let local_addr: SocketAddr = "127.0.0.1:443".parse().unwrap();
+    let probe = b"GET /bounded HTTP/1.1\r\nHost: x\r\n\r\n";
+
+    let (_client_reader_side, client_reader) = duplex(256);
+    let (_client_visible_reader, client_visible_writer) = duplex(256);
+    let beobachten = BeobachtenStore::new();
+
+    let started = Instant::now();
+    handle_bad_client(
+        client_reader,
+        client_visible_writer,
+        probe,
+        peer,
+        local_addr,
+        &config,
+        &beobachten,
+    )
+    .await;
+
+    let elapsed = started.elapsed();
+    assert!(
+        elapsed >= Duration::from_millis(45),
+        "connect refusal path must respect minimum masking budget"
+    );
+    assert!(
+        elapsed < Duration::from_millis(500),
+        "connect refusal path must stay bounded and avoid unbounded stall"
+    );
+}
+
+#[tokio::test]
+async fn reachable_backend_one_response_then_silence_is_cut_by_idle_timeout() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let backend_addr = listener.local_addr().unwrap();
+    let probe = b"GET /oneshot HTTP/1.1\r\nHost: front.example\r\n\r\n".to_vec();
+    let response = b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nOK".to_vec();
+
+    let accept_task = tokio::spawn({
+        let probe = probe.clone();
+        let response = response.clone();
+        async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut received = vec![0u8; probe.len()];
+            stream.read_exact(&mut received).await.unwrap();
+            assert_eq!(received, probe);
+            stream.write_all(&response).await.unwrap();
+            sleep(Duration::from_millis(300)).await;
+        }
+    });
+
+    let mut config = ProxyConfig::default();
+    config.general.beobachten = false;
+    config.censorship.mask = true;
+    config.censorship.mask_host = Some("127.0.0.1".to_string());
+    config.censorship.mask_port = backend_addr.port();
+    config.censorship.mask_unix_sock = None;
+    config.censorship.mask_proxy_protocol = 0;
+
+    let peer: SocketAddr = "203.0.113.42:51002".parse().unwrap();
+    let local_addr: SocketAddr = "127.0.0.1:443".parse().unwrap();
+
+    let (_client_reader_side, client_reader) = duplex(256);
+    let (mut client_visible_reader, client_visible_writer) = duplex(512);
+    let beobachten = BeobachtenStore::new();
+
+    let started = Instant::now();
+    handle_bad_client(
+        client_reader,
+        client_visible_writer,
+        &probe,
+        peer,
+        local_addr,
+        &config,
+        &beobachten,
+    )
+    .await;
+    let elapsed = started.elapsed();
+
+    let mut observed = vec![0u8; response.len()];
+    client_visible_reader.read_exact(&mut observed).await.unwrap();
+    assert_eq!(observed, response);
+    assert!(
+        elapsed < Duration::from_millis(190),
+        "idle backend silence after first response must be cut by relay idle timeout"
+    );
+
+    accept_task.await.unwrap();
+}
+
+#[tokio::test]
+async fn adversarial_client_drip_feed_longer_than_idle_timeout_is_cut_off() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let backend_addr = listener.local_addr().unwrap();
+    let initial = b"GET /drip HTTP/1.1\r\nHost: front.example\r\n\r\n".to_vec();
+
+    let accept_task = tokio::spawn({
+        let initial = initial.clone();
+        async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut observed = vec![0u8; initial.len()];
+            stream.read_exact(&mut observed).await.unwrap();
+            assert_eq!(observed, initial);
+
+            let mut extra = [0u8; 1];
+            let read_res = timeout(Duration::from_millis(220), stream.read_exact(&mut extra)).await;
+            assert!(
+                read_res.is_err() || read_res.unwrap().is_err(),
+                "drip-fed post-probe byte arriving after idle timeout should not be forwarded"
+            );
+        }
+    });
+
+    let mut config = ProxyConfig::default();
+    config.general.beobachten = false;
+    config.censorship.mask = true;
+    config.censorship.mask_host = Some("127.0.0.1".to_string());
+    config.censorship.mask_port = backend_addr.port();
+    config.censorship.mask_unix_sock = None;
+    config.censorship.mask_proxy_protocol = 0;
+
+    let peer: SocketAddr = "203.0.113.43:51003".parse().unwrap();
+    let local_addr: SocketAddr = "127.0.0.1:443".parse().unwrap();
+
+    let (mut client_writer_side, client_reader) = duplex(256);
+    let (_client_visible_reader, client_visible_writer) = duplex(256);
+    let beobachten = BeobachtenStore::new();
+
+    let relay_task = tokio::spawn(async move {
+        handle_bad_client(
+            client_reader,
+            client_visible_writer,
+            &initial,
+            peer,
+            local_addr,
+            &config,
+            &beobachten,
+        )
+        .await;
+    });
+
+    sleep(Duration::from_millis(160)).await;
+    let _ = client_writer_side.write_all(b"X").await;
+    drop(client_writer_side);
+
+    timeout(Duration::from_secs(1), relay_task).await.unwrap().unwrap();
+    accept_task.await.unwrap();
 }

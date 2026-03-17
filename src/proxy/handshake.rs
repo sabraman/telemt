@@ -36,6 +36,7 @@ const AUTH_PROBE_TRACK_MAX_ENTRIES: usize = 256;
 const AUTH_PROBE_TRACK_MAX_ENTRIES: usize = 65_536;
 const AUTH_PROBE_PRUNE_SCAN_LIMIT: usize = 1_024;
 const AUTH_PROBE_BACKOFF_START_FAILS: u32 = 4;
+const AUTH_PROBE_SATURATION_GRACE_FAILS: u32 = 2;
 
 #[cfg(test)]
 const AUTH_PROBE_BACKOFF_BASE_MS: u64 = 1;
@@ -54,10 +55,22 @@ struct AuthProbeState {
     last_seen: Instant,
 }
 
+#[derive(Clone, Copy)]
+struct AuthProbeSaturationState {
+    fail_streak: u32,
+    blocked_until: Instant,
+    last_seen: Instant,
+}
+
 static AUTH_PROBE_STATE: OnceLock<DashMap<IpAddr, AuthProbeState>> = OnceLock::new();
+static AUTH_PROBE_SATURATION_STATE: OnceLock<Mutex<Option<AuthProbeSaturationState>>> = OnceLock::new();
 
 fn auth_probe_state_map() -> &'static DashMap<IpAddr, AuthProbeState> {
     AUTH_PROBE_STATE.get_or_init(DashMap::new)
+}
+
+fn auth_probe_saturation_state() -> &'static Mutex<Option<AuthProbeSaturationState>> {
+    AUTH_PROBE_SATURATION_STATE.get_or_init(|| Mutex::new(None))
 }
 
 fn normalize_auth_probe_ip(peer_ip: IpAddr) -> IpAddr {
@@ -106,6 +119,83 @@ fn auth_probe_is_throttled(peer_ip: IpAddr, now: Instant) -> bool {
         return false;
     }
     now < entry.blocked_until
+}
+
+fn auth_probe_saturation_grace_exhausted(peer_ip: IpAddr, now: Instant) -> bool {
+    let peer_ip = normalize_auth_probe_ip(peer_ip);
+    let state = auth_probe_state_map();
+    let Some(entry) = state.get(&peer_ip) else {
+        return false;
+    };
+    if auth_probe_state_expired(&entry, now) {
+        drop(entry);
+        state.remove(&peer_ip);
+        return false;
+    }
+
+    entry.fail_streak >= AUTH_PROBE_BACKOFF_START_FAILS + AUTH_PROBE_SATURATION_GRACE_FAILS
+}
+
+fn auth_probe_should_apply_preauth_throttle(peer_ip: IpAddr, now: Instant) -> bool {
+    if !auth_probe_is_throttled(peer_ip, now) {
+        return false;
+    }
+
+    if !auth_probe_saturation_is_throttled(now) {
+        return true;
+    }
+
+    auth_probe_saturation_grace_exhausted(peer_ip, now)
+}
+
+fn auth_probe_saturation_is_throttled(now: Instant) -> bool {
+    let saturation = auth_probe_saturation_state();
+    let mut guard = match saturation.lock() {
+        Ok(guard) => guard,
+        Err(_) => return false,
+    };
+
+    let Some(state) = guard.as_mut() else {
+        return false;
+    };
+
+    if now.duration_since(state.last_seen) > Duration::from_secs(AUTH_PROBE_TRACK_RETENTION_SECS) {
+        *guard = None;
+        return false;
+    }
+
+    if now < state.blocked_until {
+        return true;
+    }
+
+    false
+}
+
+fn auth_probe_note_saturation(now: Instant) {
+    let saturation = auth_probe_saturation_state();
+    let mut guard = match saturation.lock() {
+        Ok(guard) => guard,
+        Err(_) => return,
+    };
+
+    match guard.as_mut() {
+        Some(state)
+            if now.duration_since(state.last_seen)
+                <= Duration::from_secs(AUTH_PROBE_TRACK_RETENTION_SECS) =>
+        {
+            state.fail_streak = state.fail_streak.saturating_add(1);
+            state.last_seen = now;
+            state.blocked_until = now + auth_probe_backoff(state.fail_streak);
+        }
+        _ => {
+            let fail_streak = AUTH_PROBE_BACKOFF_START_FAILS;
+            *guard = Some(AuthProbeSaturationState {
+                fail_streak,
+                blocked_until: now + auth_probe_backoff(fail_streak),
+                last_seen: now,
+            });
+        }
+    }
 }
 
 fn auth_probe_record_failure(peer_ip: IpAddr, now: Instant) {
@@ -157,11 +247,11 @@ fn auth_probe_record_failure_with_state(
         }
         if state.len() >= AUTH_PROBE_TRACK_MAX_ENTRIES {
             if eviction_candidates.is_empty() {
+                auth_probe_note_saturation(now);
                 return;
             }
-            let idx = auth_probe_eviction_offset(peer_ip, now) % eviction_candidates.len();
-            let evict_key = eviction_candidates[idx];
-            state.remove(&evict_key);
+            auth_probe_note_saturation(now);
+            return;
         }
     }
 
@@ -186,6 +276,11 @@ fn clear_auth_probe_state_for_testing() {
     if let Some(state) = AUTH_PROBE_STATE.get() {
         state.clear();
     }
+    if let Some(saturation) = AUTH_PROBE_SATURATION_STATE.get()
+        && let Ok(mut guard) = saturation.lock()
+    {
+        *guard = None;
+    }
 }
 
 #[cfg(test)]
@@ -198,6 +293,11 @@ fn auth_probe_fail_streak_for_testing(peer_ip: IpAddr) -> Option<u32> {
 #[cfg(test)]
 fn auth_probe_is_throttled_for_testing(peer_ip: IpAddr) -> bool {
     auth_probe_is_throttled(peer_ip, Instant::now())
+}
+
+#[cfg(test)]
+fn auth_probe_saturation_is_throttled_for_testing() -> bool {
+    auth_probe_saturation_is_throttled(Instant::now())
 }
 
 #[cfg(test)]
@@ -385,7 +485,8 @@ where
 {
     debug!(peer = %peer, handshake_len = handshake.len(), "Processing TLS handshake");
 
-    if auth_probe_is_throttled(peer.ip(), Instant::now()) {
+    let throttle_now = Instant::now();
+    if auth_probe_should_apply_preauth_throttle(peer.ip(), throttle_now) {
         maybe_apply_server_hello_delay(config).await;
         debug!(peer = %peer, "TLS handshake rejected by pre-auth probe throttle");
         return HandshakeResult::BadClient { reader, writer };
@@ -554,7 +655,8 @@ where
 {
     trace!(peer = %peer, handshake = ?hex::encode(handshake), "MTProto handshake bytes");
 
-    if auth_probe_is_throttled(peer.ip(), Instant::now()) {
+    let throttle_now = Instant::now();
+    if auth_probe_should_apply_preauth_throttle(peer.ip(), throttle_now) {
         maybe_apply_server_hello_delay(config).await;
         debug!(peer = %peer, "MTProto handshake rejected by pre-auth probe throttle");
         return HandshakeResult::BadClient { reader, writer };

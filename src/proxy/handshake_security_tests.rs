@@ -1,6 +1,8 @@
 use super::*;
-use crate::crypto::sha256_hmac;
+use crate::crypto::{sha256, sha256_hmac};
 use dashmap::DashMap;
+use rand::{Rng, SeedableRng};
+use rand::rngs::StdRng;
 use std::net::{IpAddr, Ipv4Addr};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -92,6 +94,43 @@ fn test_config_with_secret_hex(secret_hex: &str) -> ProxyConfig {
         .insert("user".to_string(), secret_hex.to_string());
     cfg.access.ignore_time_skew = true;
     cfg
+}
+
+fn make_valid_mtproto_handshake(secret_hex: &str, proto_tag: ProtoTag, dc_idx: i16) -> [u8; HANDSHAKE_LEN] {
+    let secret = hex::decode(secret_hex).expect("secret hex must decode for mtproto test helper");
+
+    let mut handshake = [0x5Au8; HANDSHAKE_LEN];
+    for (idx, b) in handshake[SKIP_LEN..SKIP_LEN + PREKEY_LEN + IV_LEN]
+        .iter_mut()
+        .enumerate()
+    {
+        *b = (idx as u8).wrapping_add(1);
+    }
+
+    let dec_prekey = &handshake[SKIP_LEN..SKIP_LEN + PREKEY_LEN];
+    let dec_iv_bytes = &handshake[SKIP_LEN + PREKEY_LEN..SKIP_LEN + PREKEY_LEN + IV_LEN];
+
+    let mut dec_key_input = Vec::with_capacity(PREKEY_LEN + secret.len());
+    dec_key_input.extend_from_slice(dec_prekey);
+    dec_key_input.extend_from_slice(&secret);
+    let dec_key = sha256(&dec_key_input);
+
+    let mut dec_iv_arr = [0u8; IV_LEN];
+    dec_iv_arr.copy_from_slice(dec_iv_bytes);
+    let dec_iv = u128::from_be_bytes(dec_iv_arr);
+
+    let mut stream = AesCtr::new(&dec_key, dec_iv);
+    let keystream = stream.encrypt(&[0u8; HANDSHAKE_LEN]);
+
+    let mut target_plain = [0u8; HANDSHAKE_LEN];
+    target_plain[PROTO_TAG_POS..PROTO_TAG_POS + 4].copy_from_slice(&proto_tag.to_bytes());
+    target_plain[DC_IDX_POS..DC_IDX_POS + 2].copy_from_slice(&dc_idx.to_le_bytes());
+
+    for idx in PROTO_TAG_POS..HANDSHAKE_LEN {
+        handshake[idx] = target_plain[idx] ^ keystream[idx];
+    }
+
+    handshake
 }
 
 #[test]
@@ -349,6 +388,7 @@ async fn invalid_tls_probe_does_not_pollute_replay_cache() {
     invalid[tls::TLS_DIGEST_POS + tls::TLS_DIGEST_LEN] = 32;
 
     let before = replay_checker.stats();
+
     let result = handle_tls_handshake(
         &invalid,
         tokio::io::empty(),
@@ -1013,7 +1053,7 @@ fn auth_probe_capacity_prunes_stale_entries_for_new_ips() {
 }
 
 #[test]
-fn auth_probe_capacity_forces_bounded_eviction_when_map_is_fresh_and_full() {
+fn auth_probe_capacity_saturation_enables_global_throttle_when_map_is_fresh_and_full() {
     let state = DashMap::new();
     let now = Instant::now();
 
@@ -1038,13 +1078,17 @@ fn auth_probe_capacity_forces_bounded_eviction_when_map_is_fresh_and_full() {
     auth_probe_record_failure_with_state(&state, newcomer, now);
 
     assert!(
-        state.get(&newcomer).is_some(),
-        "when all entries are fresh and full, one bounded eviction must admit a new probe source"
+        state.get(&newcomer).is_none(),
+        "fresh-at-cap auth probe state must not churn by evicting tracked sources"
     );
     assert_eq!(
         state.len(),
         AUTH_PROBE_TRACK_MAX_ENTRIES,
-        "auth probe map must stay at the configured cap after forced eviction"
+        "auth probe map must stay exactly at the configured cap under saturation"
+    );
+    assert!(
+        auth_probe_saturation_is_throttled_for_testing(),
+        "capacity saturation must activate coarse global pre-auth throttling"
     );
 }
 
@@ -1248,5 +1292,1120 @@ async fn invalid_probe_noise_from_other_ips_does_not_break_valid_tls_handshake()
         auth_probe_fail_streak_for_testing(victim_peer.ip()),
         None,
         "successful victim handshake must not retain pre-auth failure streak"
+    );
+}
+
+#[test]
+fn auth_probe_saturation_state_expires_after_retention_window() {
+    let _guard = auth_probe_test_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    clear_auth_probe_state_for_testing();
+
+    let now = Instant::now();
+    let saturation = auth_probe_saturation_state();
+    {
+        let mut guard = saturation
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        *guard = Some(AuthProbeSaturationState {
+            fail_streak: AUTH_PROBE_BACKOFF_START_FAILS,
+            blocked_until: now + Duration::from_secs(30),
+            last_seen: now - Duration::from_secs(AUTH_PROBE_TRACK_RETENTION_SECS + 1),
+        });
+    }
+
+    assert!(
+        !auth_probe_saturation_is_throttled_for_testing(),
+        "expired saturation state must stop throttling and self-clear"
+    );
+
+    let guard = saturation
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    assert!(guard.is_none(), "expired saturation state must be removed");
+}
+
+#[tokio::test]
+async fn global_saturation_marker_does_not_block_valid_tls_handshake() {
+    let _guard = auth_probe_test_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    clear_auth_probe_state_for_testing();
+
+    let secret = [0x41u8; 16];
+    let config = test_config_with_secret_hex("41414141414141414141414141414141");
+    let replay_checker = ReplayChecker::new(128, Duration::from_secs(60));
+    let rng = SecureRandom::new();
+    let peer: SocketAddr = "198.51.100.101:45101".parse().unwrap();
+
+    let now = Instant::now();
+    let saturation = auth_probe_saturation_state();
+    {
+        let mut guard = saturation
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        *guard = Some(AuthProbeSaturationState {
+            fail_streak: AUTH_PROBE_BACKOFF_START_FAILS,
+            blocked_until: now + Duration::from_secs(5),
+            last_seen: now,
+        });
+    }
+
+    let valid = make_valid_tls_handshake(&secret, 0);
+    let result = handle_tls_handshake(
+        &valid,
+        tokio::io::empty(),
+        tokio::io::sink(),
+        peer,
+        &config,
+        &replay_checker,
+        &rng,
+        None,
+    )
+    .await;
+
+    assert!(
+        matches!(result, HandshakeResult::Success(_)),
+        "global saturation marker must not block valid authenticated TLS handshakes"
+    );
+    assert_eq!(
+        auth_probe_fail_streak_for_testing(peer.ip()),
+        None,
+        "successful handshake under saturation marker must not retain per-ip probe failures"
+    );
+}
+
+#[tokio::test]
+async fn expired_global_saturation_allows_valid_tls_handshake() {
+    let _guard = auth_probe_test_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    clear_auth_probe_state_for_testing();
+
+    let secret = [0x55u8; 16];
+    let config = test_config_with_secret_hex("55555555555555555555555555555555");
+    let replay_checker = ReplayChecker::new(128, Duration::from_secs(60));
+    let rng = SecureRandom::new();
+    let peer: SocketAddr = "198.51.100.102:45102".parse().unwrap();
+
+    let now = Instant::now();
+    let saturation = auth_probe_saturation_state();
+    {
+        let mut guard = saturation
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        *guard = Some(AuthProbeSaturationState {
+            fail_streak: AUTH_PROBE_BACKOFF_START_FAILS,
+            blocked_until: now + Duration::from_secs(5),
+            last_seen: now - Duration::from_secs(AUTH_PROBE_TRACK_RETENTION_SECS + 1),
+        });
+    }
+
+    let valid = make_valid_tls_handshake(&secret, 0);
+    let result = handle_tls_handshake(
+        &valid,
+        tokio::io::empty(),
+        tokio::io::sink(),
+        peer,
+        &config,
+        &replay_checker,
+        &rng,
+        None,
+    )
+    .await;
+
+    assert!(
+        matches!(result, HandshakeResult::Success(_)),
+        "expired saturation marker must not block valid handshake"
+    );
+}
+
+#[tokio::test]
+async fn valid_tls_is_blocked_by_per_ip_preauth_throttle_without_saturation() {
+    let _guard = auth_probe_test_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    clear_auth_probe_state_for_testing();
+
+    let secret = [0x61u8; 16];
+    let config = test_config_with_secret_hex("61616161616161616161616161616161");
+    let replay_checker = ReplayChecker::new(128, Duration::from_secs(60));
+    let rng = SecureRandom::new();
+    let peer: SocketAddr = "198.51.100.103:45103".parse().unwrap();
+
+    auth_probe_state_map().insert(
+        normalize_auth_probe_ip(peer.ip()),
+        AuthProbeState {
+            fail_streak: AUTH_PROBE_BACKOFF_START_FAILS,
+            blocked_until: Instant::now() + Duration::from_secs(5),
+            last_seen: Instant::now(),
+        },
+    );
+
+    let valid = make_valid_tls_handshake(&secret, 0);
+    let result = handle_tls_handshake(
+        &valid,
+        tokio::io::empty(),
+        tokio::io::sink(),
+        peer,
+        &config,
+        &replay_checker,
+        &rng,
+        None,
+    )
+    .await;
+
+    assert!(matches!(result, HandshakeResult::BadClient { .. }));
+}
+
+#[tokio::test]
+async fn saturation_allows_valid_tls_even_when_peer_ip_is_currently_throttled() {
+    let _guard = auth_probe_test_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    clear_auth_probe_state_for_testing();
+
+    let secret = [0x62u8; 16];
+    let config = test_config_with_secret_hex("62626262626262626262626262626262");
+    let replay_checker = ReplayChecker::new(128, Duration::from_secs(60));
+    let rng = SecureRandom::new();
+    let peer: SocketAddr = "198.51.100.104:45104".parse().unwrap();
+    let now = Instant::now();
+
+    auth_probe_state_map().insert(
+        normalize_auth_probe_ip(peer.ip()),
+        AuthProbeState {
+            fail_streak: AUTH_PROBE_BACKOFF_START_FAILS,
+            blocked_until: now + Duration::from_secs(5),
+            last_seen: now,
+        },
+    );
+    {
+        let mut guard = auth_probe_saturation_state()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        *guard = Some(AuthProbeSaturationState {
+            fail_streak: AUTH_PROBE_BACKOFF_START_FAILS,
+            blocked_until: now + Duration::from_secs(5),
+            last_seen: now,
+        });
+    }
+
+    let valid = make_valid_tls_handshake(&secret, 0);
+    let result = handle_tls_handshake(
+        &valid,
+        tokio::io::empty(),
+        tokio::io::sink(),
+        peer,
+        &config,
+        &replay_checker,
+        &rng,
+        None,
+    )
+    .await;
+
+    assert!(matches!(result, HandshakeResult::Success(_)));
+    assert_eq!(
+        auth_probe_fail_streak_for_testing(peer.ip()),
+        None,
+        "successful auth under saturation must clear the peer's throttled state"
+    );
+}
+
+#[tokio::test]
+async fn saturation_still_rejects_invalid_tls_probe_and_records_failure() {
+    let _guard = auth_probe_test_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    clear_auth_probe_state_for_testing();
+
+    let config = test_config_with_secret_hex("63636363636363636363636363636363");
+    let replay_checker = ReplayChecker::new(128, Duration::from_secs(60));
+    let rng = SecureRandom::new();
+    let peer: SocketAddr = "198.51.100.105:45105".parse().unwrap();
+    let now = Instant::now();
+    {
+        let mut guard = auth_probe_saturation_state()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        *guard = Some(AuthProbeSaturationState {
+            fail_streak: AUTH_PROBE_BACKOFF_START_FAILS,
+            blocked_until: now + Duration::from_secs(5),
+            last_seen: now,
+        });
+    }
+
+    let mut invalid = vec![0x42u8; tls::TLS_DIGEST_POS + tls::TLS_DIGEST_LEN + 1 + 32];
+    invalid[tls::TLS_DIGEST_POS + tls::TLS_DIGEST_LEN] = 32;
+
+    let result = handle_tls_handshake(
+        &invalid,
+        tokio::io::empty(),
+        tokio::io::sink(),
+        peer,
+        &config,
+        &replay_checker,
+        &rng,
+        None,
+    )
+    .await;
+
+    assert!(matches!(result, HandshakeResult::BadClient { .. }));
+    assert_eq!(
+        auth_probe_fail_streak_for_testing(peer.ip()),
+        Some(1),
+        "invalid TLS during saturation must still increment per-ip failure tracking"
+    );
+}
+
+#[tokio::test]
+async fn saturation_grace_exhaustion_preauth_throttles_repeated_invalid_tls_probe() {
+    let _guard = auth_probe_test_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    clear_auth_probe_state_for_testing();
+
+    let config = test_config_with_secret_hex("63636363636363636363636363636363");
+    let replay_checker = ReplayChecker::new(128, Duration::from_secs(60));
+    let rng = SecureRandom::new();
+    let peer: SocketAddr = "198.51.100.205:45205".parse().unwrap();
+    let now = Instant::now();
+    auth_probe_state_map().insert(
+        normalize_auth_probe_ip(peer.ip()),
+        AuthProbeState {
+            fail_streak: AUTH_PROBE_BACKOFF_START_FAILS + AUTH_PROBE_SATURATION_GRACE_FAILS,
+            blocked_until: now + Duration::from_secs(1),
+            last_seen: now,
+        },
+    );
+    {
+        let mut guard = auth_probe_saturation_state()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        *guard = Some(AuthProbeSaturationState {
+            fail_streak: AUTH_PROBE_BACKOFF_START_FAILS,
+            blocked_until: now + Duration::from_secs(1),
+            last_seen: now,
+        });
+    }
+
+    let mut invalid = vec![0x42u8; tls::TLS_DIGEST_POS + tls::TLS_DIGEST_LEN + 1 + 32];
+    invalid[tls::TLS_DIGEST_POS + tls::TLS_DIGEST_LEN] = 32;
+
+    let result = handle_tls_handshake(
+        &invalid,
+        tokio::io::empty(),
+        tokio::io::sink(),
+        peer,
+        &config,
+        &replay_checker,
+        &rng,
+        None,
+    )
+    .await;
+
+    assert!(matches!(result, HandshakeResult::BadClient { .. }));
+    assert_eq!(
+        auth_probe_fail_streak_for_testing(peer.ip()),
+        Some(AUTH_PROBE_BACKOFF_START_FAILS + AUTH_PROBE_SATURATION_GRACE_FAILS),
+        "pre-auth throttle under exhausted saturation grace must reject without re-processing invalid TLS"
+    );
+}
+
+#[tokio::test]
+async fn saturation_allows_valid_mtproto_even_when_peer_ip_is_currently_throttled() {
+    let _guard = auth_probe_test_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    clear_auth_probe_state_for_testing();
+
+    let secret_hex = "64646464646464646464646464646464";
+    let mut config = test_config_with_secret_hex(secret_hex);
+    config.general.modes.secure = true;
+    let replay_checker = ReplayChecker::new(128, Duration::from_secs(60));
+    let peer: SocketAddr = "198.51.100.106:45106".parse().unwrap();
+    let now = Instant::now();
+
+    auth_probe_state_map().insert(
+        normalize_auth_probe_ip(peer.ip()),
+        AuthProbeState {
+            fail_streak: AUTH_PROBE_BACKOFF_START_FAILS,
+            blocked_until: now + Duration::from_secs(5),
+            last_seen: now,
+        },
+    );
+    {
+        let mut guard = auth_probe_saturation_state()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        *guard = Some(AuthProbeSaturationState {
+            fail_streak: AUTH_PROBE_BACKOFF_START_FAILS,
+            blocked_until: now + Duration::from_secs(5),
+            last_seen: now,
+        });
+    }
+
+    let valid = make_valid_mtproto_handshake(secret_hex, ProtoTag::Secure, 2);
+    let result = handle_mtproto_handshake(
+        &valid,
+        tokio::io::empty(),
+        tokio::io::sink(),
+        peer,
+        &config,
+        &replay_checker,
+        false,
+        None,
+    )
+    .await;
+
+    assert!(matches!(result, HandshakeResult::Success(_)));
+    assert_eq!(
+        auth_probe_fail_streak_for_testing(peer.ip()),
+        None,
+        "successful mtproto auth under saturation must clear the peer's throttled state"
+    );
+}
+
+#[tokio::test]
+async fn saturation_still_rejects_invalid_mtproto_probe_and_records_failure() {
+    let _guard = auth_probe_test_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    clear_auth_probe_state_for_testing();
+
+    let config = test_config_with_secret_hex("65656565656565656565656565656565");
+    let replay_checker = ReplayChecker::new(128, Duration::from_secs(60));
+    let peer: SocketAddr = "198.51.100.107:45107".parse().unwrap();
+    let now = Instant::now();
+    {
+        let mut guard = auth_probe_saturation_state()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        *guard = Some(AuthProbeSaturationState {
+            fail_streak: AUTH_PROBE_BACKOFF_START_FAILS,
+            blocked_until: now + Duration::from_secs(5),
+            last_seen: now,
+        });
+    }
+
+    let invalid = [0u8; HANDSHAKE_LEN];
+
+    let result = handle_mtproto_handshake(
+        &invalid,
+        tokio::io::empty(),
+        tokio::io::sink(),
+        peer,
+        &config,
+        &replay_checker,
+        false,
+        None,
+    )
+    .await;
+
+    assert!(matches!(result, HandshakeResult::BadClient { .. }));
+    assert_eq!(
+        auth_probe_fail_streak_for_testing(peer.ip()),
+        Some(1),
+        "invalid mtproto during saturation must still increment per-ip failure tracking"
+    );
+}
+
+#[tokio::test]
+async fn saturation_grace_exhaustion_preauth_throttles_repeated_invalid_mtproto_probe() {
+    let _guard = auth_probe_test_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    clear_auth_probe_state_for_testing();
+
+    let config = test_config_with_secret_hex("65656565656565656565656565656565");
+    let replay_checker = ReplayChecker::new(128, Duration::from_secs(60));
+    let peer: SocketAddr = "198.51.100.206:45206".parse().unwrap();
+    let now = Instant::now();
+    auth_probe_state_map().insert(
+        normalize_auth_probe_ip(peer.ip()),
+        AuthProbeState {
+            fail_streak: AUTH_PROBE_BACKOFF_START_FAILS + AUTH_PROBE_SATURATION_GRACE_FAILS,
+            blocked_until: now + Duration::from_secs(1),
+            last_seen: now,
+        },
+    );
+    {
+        let mut guard = auth_probe_saturation_state()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        *guard = Some(AuthProbeSaturationState {
+            fail_streak: AUTH_PROBE_BACKOFF_START_FAILS,
+            blocked_until: now + Duration::from_secs(1),
+            last_seen: now,
+        });
+    }
+
+    let invalid = [0u8; HANDSHAKE_LEN];
+    let result = handle_mtproto_handshake(
+        &invalid,
+        tokio::io::empty(),
+        tokio::io::sink(),
+        peer,
+        &config,
+        &replay_checker,
+        false,
+        None,
+    )
+    .await;
+
+    assert!(matches!(result, HandshakeResult::BadClient { .. }));
+    assert_eq!(
+        auth_probe_fail_streak_for_testing(peer.ip()),
+        Some(AUTH_PROBE_BACKOFF_START_FAILS + AUTH_PROBE_SATURATION_GRACE_FAILS),
+        "pre-auth throttle under exhausted saturation grace must reject without re-processing invalid MTProto"
+    );
+}
+
+#[tokio::test]
+async fn saturation_grace_progression_tls_reaches_cap_then_stops_incrementing() {
+    let _guard = auth_probe_test_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    clear_auth_probe_state_for_testing();
+
+    let config = test_config_with_secret_hex("70707070707070707070707070707070");
+    let replay_checker = ReplayChecker::new(128, Duration::from_secs(60));
+    let rng = SecureRandom::new();
+    let peer: SocketAddr = "198.51.100.207:45207".parse().unwrap();
+    let now = Instant::now();
+    auth_probe_state_map().insert(
+        normalize_auth_probe_ip(peer.ip()),
+        AuthProbeState {
+            fail_streak: AUTH_PROBE_BACKOFF_START_FAILS,
+            blocked_until: now + Duration::from_secs(1),
+            last_seen: now,
+        },
+    );
+    {
+        let mut guard = auth_probe_saturation_state()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        *guard = Some(AuthProbeSaturationState {
+            fail_streak: AUTH_PROBE_BACKOFF_START_FAILS,
+            blocked_until: now + Duration::from_secs(1),
+            last_seen: now,
+        });
+    }
+
+    let mut invalid = vec![0x42u8; tls::TLS_DIGEST_POS + tls::TLS_DIGEST_LEN + 1 + 32];
+    invalid[tls::TLS_DIGEST_POS + tls::TLS_DIGEST_LEN] = 32;
+
+    for expected in [
+        AUTH_PROBE_BACKOFF_START_FAILS + 1,
+        AUTH_PROBE_BACKOFF_START_FAILS + AUTH_PROBE_SATURATION_GRACE_FAILS,
+    ] {
+        let result = handle_tls_handshake(
+            &invalid,
+            tokio::io::empty(),
+            tokio::io::sink(),
+            peer,
+            &config,
+            &replay_checker,
+            &rng,
+            None,
+        )
+        .await;
+        assert!(matches!(result, HandshakeResult::BadClient { .. }));
+        assert_eq!(auth_probe_fail_streak_for_testing(peer.ip()), Some(expected));
+    }
+
+    {
+        let mut entry = auth_probe_state_map()
+            .get_mut(&normalize_auth_probe_ip(peer.ip()))
+            .expect("peer state must exist before exhaustion recheck");
+        entry.fail_streak = AUTH_PROBE_BACKOFF_START_FAILS + AUTH_PROBE_SATURATION_GRACE_FAILS;
+        entry.blocked_until = Instant::now() + Duration::from_secs(1);
+        entry.last_seen = Instant::now();
+    }
+
+    let result = handle_tls_handshake(
+        &invalid,
+        tokio::io::empty(),
+        tokio::io::sink(),
+        peer,
+        &config,
+        &replay_checker,
+        &rng,
+        None,
+    )
+    .await;
+    assert!(matches!(result, HandshakeResult::BadClient { .. }));
+    assert_eq!(
+        auth_probe_fail_streak_for_testing(peer.ip()),
+        Some(AUTH_PROBE_BACKOFF_START_FAILS + AUTH_PROBE_SATURATION_GRACE_FAILS),
+        "once grace is exhausted, repeated invalid TLS must be pre-auth throttled without further fail-streak growth"
+    );
+}
+
+#[tokio::test]
+async fn saturation_grace_progression_mtproto_reaches_cap_then_stops_incrementing() {
+    let _guard = auth_probe_test_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    clear_auth_probe_state_for_testing();
+
+    let config = test_config_with_secret_hex("71717171717171717171717171717171");
+    let replay_checker = ReplayChecker::new(128, Duration::from_secs(60));
+    let peer: SocketAddr = "198.51.100.208:45208".parse().unwrap();
+    let now = Instant::now();
+    auth_probe_state_map().insert(
+        normalize_auth_probe_ip(peer.ip()),
+        AuthProbeState {
+            fail_streak: AUTH_PROBE_BACKOFF_START_FAILS,
+            blocked_until: now + Duration::from_secs(1),
+            last_seen: now,
+        },
+    );
+    {
+        let mut guard = auth_probe_saturation_state()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        *guard = Some(AuthProbeSaturationState {
+            fail_streak: AUTH_PROBE_BACKOFF_START_FAILS,
+            blocked_until: now + Duration::from_secs(1),
+            last_seen: now,
+        });
+    }
+
+    let invalid = [0u8; HANDSHAKE_LEN];
+
+    for expected in [
+        AUTH_PROBE_BACKOFF_START_FAILS + 1,
+        AUTH_PROBE_BACKOFF_START_FAILS + AUTH_PROBE_SATURATION_GRACE_FAILS,
+    ] {
+        let result = handle_mtproto_handshake(
+            &invalid,
+            tokio::io::empty(),
+            tokio::io::sink(),
+            peer,
+            &config,
+            &replay_checker,
+            false,
+            None,
+        )
+        .await;
+        assert!(matches!(result, HandshakeResult::BadClient { .. }));
+        assert_eq!(auth_probe_fail_streak_for_testing(peer.ip()), Some(expected));
+    }
+
+    {
+        let mut entry = auth_probe_state_map()
+            .get_mut(&normalize_auth_probe_ip(peer.ip()))
+            .expect("peer state must exist before exhaustion recheck");
+        entry.fail_streak = AUTH_PROBE_BACKOFF_START_FAILS + AUTH_PROBE_SATURATION_GRACE_FAILS;
+        entry.blocked_until = Instant::now() + Duration::from_secs(1);
+        entry.last_seen = Instant::now();
+    }
+
+    let result = handle_mtproto_handshake(
+        &invalid,
+        tokio::io::empty(),
+        tokio::io::sink(),
+        peer,
+        &config,
+        &replay_checker,
+        false,
+        None,
+    )
+    .await;
+    assert!(matches!(result, HandshakeResult::BadClient { .. }));
+    assert_eq!(
+        auth_probe_fail_streak_for_testing(peer.ip()),
+        Some(AUTH_PROBE_BACKOFF_START_FAILS + AUTH_PROBE_SATURATION_GRACE_FAILS),
+        "once grace is exhausted, repeated invalid MTProto must be pre-auth throttled without further fail-streak growth"
+    );
+}
+
+#[tokio::test]
+async fn saturation_grace_boundary_still_admits_valid_tls_before_exhaustion() {
+    let _guard = auth_probe_test_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    clear_auth_probe_state_for_testing();
+
+    let secret = [0x72u8; 16];
+    let config = test_config_with_secret_hex("72727272727272727272727272727272");
+    let replay_checker = ReplayChecker::new(128, Duration::from_secs(60));
+    let rng = SecureRandom::new();
+    let peer: SocketAddr = "198.51.100.209:45209".parse().unwrap();
+    let now = Instant::now();
+    auth_probe_state_map().insert(
+        normalize_auth_probe_ip(peer.ip()),
+        AuthProbeState {
+            fail_streak: AUTH_PROBE_BACKOFF_START_FAILS + AUTH_PROBE_SATURATION_GRACE_FAILS - 1,
+            blocked_until: now + Duration::from_secs(1),
+            last_seen: now,
+        },
+    );
+    {
+        let mut guard = auth_probe_saturation_state()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        *guard = Some(AuthProbeSaturationState {
+            fail_streak: AUTH_PROBE_BACKOFF_START_FAILS,
+            blocked_until: now + Duration::from_secs(1),
+            last_seen: now,
+        });
+    }
+
+    let valid = make_valid_tls_handshake(&secret, 0);
+    let result = handle_tls_handshake(
+        &valid,
+        tokio::io::empty(),
+        tokio::io::sink(),
+        peer,
+        &config,
+        &replay_checker,
+        &rng,
+        None,
+    )
+    .await;
+
+    assert!(
+        matches!(result, HandshakeResult::Success(_)),
+        "valid TLS should still pass while peer remains within saturation grace budget"
+    );
+    assert_eq!(auth_probe_fail_streak_for_testing(peer.ip()), None);
+}
+
+#[tokio::test]
+async fn saturation_grace_exhaustion_blocks_valid_tls_until_backoff_expires() {
+    let _guard = auth_probe_test_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    clear_auth_probe_state_for_testing();
+
+    let secret = [0x73u8; 16];
+    let config = test_config_with_secret_hex("73737373737373737373737373737373");
+    let replay_checker = ReplayChecker::new(128, Duration::from_secs(60));
+    let rng = SecureRandom::new();
+    let peer: SocketAddr = "198.51.100.210:45210".parse().unwrap();
+    let now = Instant::now();
+    auth_probe_state_map().insert(
+        normalize_auth_probe_ip(peer.ip()),
+        AuthProbeState {
+            fail_streak: AUTH_PROBE_BACKOFF_START_FAILS + AUTH_PROBE_SATURATION_GRACE_FAILS,
+            blocked_until: now + Duration::from_millis(200),
+            last_seen: now,
+        },
+    );
+    {
+        let mut guard = auth_probe_saturation_state()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        *guard = Some(AuthProbeSaturationState {
+            fail_streak: AUTH_PROBE_BACKOFF_START_FAILS,
+            blocked_until: now + Duration::from_secs(1),
+            last_seen: now,
+        });
+    }
+
+    let valid = make_valid_tls_handshake(&secret, 0);
+    let blocked = handle_tls_handshake(
+        &valid,
+        tokio::io::empty(),
+        tokio::io::sink(),
+        peer,
+        &config,
+        &replay_checker,
+        &rng,
+        None,
+    )
+    .await;
+    assert!(matches!(blocked, HandshakeResult::BadClient { .. }));
+
+    tokio::time::sleep(Duration::from_millis(230)).await;
+
+    let allowed = handle_tls_handshake(
+        &valid,
+        tokio::io::empty(),
+        tokio::io::sink(),
+        peer,
+        &config,
+        &replay_checker,
+        &rng,
+        None,
+    )
+    .await;
+    assert!(
+        matches!(allowed, HandshakeResult::Success(_)),
+        "valid TLS should recover after peer-specific pre-auth backoff has elapsed"
+    );
+    assert_eq!(auth_probe_fail_streak_for_testing(peer.ip()), None);
+}
+
+#[tokio::test]
+async fn saturation_grace_exhaustion_is_shared_across_tls_and_mtproto_for_same_peer() {
+    let _guard = auth_probe_test_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    clear_auth_probe_state_for_testing();
+
+    let config = test_config_with_secret_hex("74747474747474747474747474747474");
+    let replay_checker = ReplayChecker::new(128, Duration::from_secs(60));
+    let rng = SecureRandom::new();
+    let peer: SocketAddr = "198.51.100.211:45211".parse().unwrap();
+    let now = Instant::now();
+    auth_probe_state_map().insert(
+        normalize_auth_probe_ip(peer.ip()),
+        AuthProbeState {
+            fail_streak: AUTH_PROBE_BACKOFF_START_FAILS + AUTH_PROBE_SATURATION_GRACE_FAILS,
+            blocked_until: now + Duration::from_secs(1),
+            last_seen: now,
+        },
+    );
+    {
+        let mut guard = auth_probe_saturation_state()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        *guard = Some(AuthProbeSaturationState {
+            fail_streak: AUTH_PROBE_BACKOFF_START_FAILS,
+            blocked_until: now + Duration::from_secs(1),
+            last_seen: now,
+        });
+    }
+
+    let mut invalid_tls = vec![0x42u8; tls::TLS_DIGEST_POS + tls::TLS_DIGEST_LEN + 1 + 32];
+    invalid_tls[tls::TLS_DIGEST_POS + tls::TLS_DIGEST_LEN] = 32;
+    let invalid_mtproto = [0u8; HANDSHAKE_LEN];
+
+    let tls_result = handle_tls_handshake(
+        &invalid_tls,
+        tokio::io::empty(),
+        tokio::io::sink(),
+        peer,
+        &config,
+        &replay_checker,
+        &rng,
+        None,
+    )
+    .await;
+    assert!(matches!(tls_result, HandshakeResult::BadClient { .. }));
+
+    let mtproto_result = handle_mtproto_handshake(
+        &invalid_mtproto,
+        tokio::io::empty(),
+        tokio::io::sink(),
+        peer,
+        &config,
+        &replay_checker,
+        false,
+        None,
+    )
+    .await;
+    assert!(matches!(mtproto_result, HandshakeResult::BadClient { .. }));
+
+    assert_eq!(
+        auth_probe_fail_streak_for_testing(peer.ip()),
+        Some(AUTH_PROBE_BACKOFF_START_FAILS + AUTH_PROBE_SATURATION_GRACE_FAILS),
+        "saturation grace exhaustion must gate both TLS and MTProto pre-auth paths for one peer"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn adversarial_same_peer_invalid_tls_storm_does_not_bypass_saturation_grace_cap() {
+    let _guard = auth_probe_test_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    clear_auth_probe_state_for_testing();
+
+    let config = Arc::new(test_config_with_secret_hex("75757575757575757575757575757575"));
+    let replay_checker = Arc::new(ReplayChecker::new(1024, Duration::from_secs(60)));
+    let rng = Arc::new(SecureRandom::new());
+    let peer: SocketAddr = "198.51.100.212:45212".parse().unwrap();
+    let now = Instant::now();
+    auth_probe_state_map().insert(
+        normalize_auth_probe_ip(peer.ip()),
+        AuthProbeState {
+            fail_streak: AUTH_PROBE_BACKOFF_START_FAILS + AUTH_PROBE_SATURATION_GRACE_FAILS,
+            blocked_until: now + Duration::from_secs(1),
+            last_seen: now,
+        },
+    );
+    {
+        let mut guard = auth_probe_saturation_state()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        *guard = Some(AuthProbeSaturationState {
+            fail_streak: AUTH_PROBE_BACKOFF_START_FAILS,
+            blocked_until: now + Duration::from_secs(1),
+            last_seen: now,
+        });
+    }
+
+    let mut invalid_tls = vec![0x42u8; tls::TLS_DIGEST_POS + tls::TLS_DIGEST_LEN + 1 + 32];
+    invalid_tls[tls::TLS_DIGEST_POS + tls::TLS_DIGEST_LEN] = 32;
+    let invalid_tls = Arc::new(invalid_tls);
+
+    let mut tasks = Vec::new();
+    for _ in 0..64usize {
+        let config = config.clone();
+        let replay_checker = replay_checker.clone();
+        let rng = rng.clone();
+        let invalid_tls = invalid_tls.clone();
+        tasks.push(tokio::spawn(async move {
+            handle_tls_handshake(
+                &invalid_tls,
+                tokio::io::empty(),
+                tokio::io::sink(),
+                peer,
+                &config,
+                &replay_checker,
+                &rng,
+                None,
+            )
+            .await
+        }));
+    }
+
+    for task in tasks {
+        let result = task.await.unwrap();
+        assert!(matches!(result, HandshakeResult::BadClient { .. }));
+    }
+
+    assert_eq!(
+        auth_probe_fail_streak_for_testing(peer.ip()),
+        Some(AUTH_PROBE_BACKOFF_START_FAILS + AUTH_PROBE_SATURATION_GRACE_FAILS),
+        "same-peer invalid storm under exhausted grace must stay pre-auth throttled without fail-streak growth"
+    );
+}
+
+#[tokio::test]
+async fn light_fuzz_saturation_grace_tls_invalid_inputs_never_authenticate_or_panic() {
+    let _guard = auth_probe_test_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    clear_auth_probe_state_for_testing();
+
+    let config = test_config_with_secret_hex("76767676767676767676767676767676");
+    let replay_checker = ReplayChecker::new(2048, Duration::from_secs(60));
+    let rng = SecureRandom::new();
+    let peer: SocketAddr = "198.51.100.213:45213".parse().unwrap();
+    let now = Instant::now();
+    auth_probe_state_map().insert(
+        normalize_auth_probe_ip(peer.ip()),
+        AuthProbeState {
+            fail_streak: AUTH_PROBE_BACKOFF_START_FAILS + AUTH_PROBE_SATURATION_GRACE_FAILS,
+            blocked_until: now + Duration::from_secs(1),
+            last_seen: now,
+        },
+    );
+    {
+        let mut guard = auth_probe_saturation_state()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        *guard = Some(AuthProbeSaturationState {
+            fail_streak: AUTH_PROBE_BACKOFF_START_FAILS,
+            blocked_until: now + Duration::from_secs(1),
+            last_seen: now,
+        });
+    }
+
+    let mut seeded = StdRng::seed_from_u64(0xD15EA5E5_u64);
+    for _ in 0..128usize {
+        let len = seeded.random_range(0usize..96usize);
+        let mut probe = vec![0u8; len];
+        seeded.fill(&mut probe[..]);
+
+        let result = handle_tls_handshake(
+            &probe,
+            tokio::io::empty(),
+            tokio::io::sink(),
+            peer,
+            &config,
+            &replay_checker,
+            &rng,
+            None,
+        )
+        .await;
+        assert!(matches!(result, HandshakeResult::BadClient { .. }));
+    }
+
+    let streak = auth_probe_fail_streak_for_testing(peer.ip())
+        .expect("peer should remain tracked after repeated invalid fuzz probes");
+    assert!(
+        streak >= AUTH_PROBE_BACKOFF_START_FAILS + AUTH_PROBE_SATURATION_GRACE_FAILS,
+        "fuzzed invalid TLS probes under saturation must not reduce fail-streak below exhaustion threshold"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn adversarial_saturation_burst_only_admits_valid_tls_and_mtproto_handshakes() {
+    let _guard = auth_probe_test_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    clear_auth_probe_state_for_testing();
+
+    let secret_hex = "66666666666666666666666666666666";
+    let secret = [0x66u8; 16];
+    let mut cfg = test_config_with_secret_hex(secret_hex);
+    cfg.general.modes.secure = true;
+    let config = Arc::new(cfg);
+    let replay_checker = Arc::new(ReplayChecker::new(4096, Duration::from_secs(60)));
+    let rng = Arc::new(SecureRandom::new());
+    let now = Instant::now();
+
+    {
+        let mut guard = auth_probe_saturation_state()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        *guard = Some(AuthProbeSaturationState {
+            fail_streak: AUTH_PROBE_BACKOFF_START_FAILS,
+            blocked_until: now + Duration::from_secs(5),
+            last_seen: now,
+        });
+    }
+
+    let valid_tls = Arc::new(make_valid_tls_handshake(&secret, 0));
+    let valid_mtproto = Arc::new(make_valid_mtproto_handshake(secret_hex, ProtoTag::Secure, 3));
+    let mut invalid_tls = vec![0x42u8; tls::TLS_DIGEST_POS + tls::TLS_DIGEST_LEN + 1 + 32];
+    invalid_tls[tls::TLS_DIGEST_POS + tls::TLS_DIGEST_LEN] = 32;
+    let invalid_tls = Arc::new(invalid_tls);
+
+    let mut invalid_tls_tasks = Vec::new();
+    for idx in 0..48u16 {
+        let config = config.clone();
+        let replay_checker = replay_checker.clone();
+        let rng = rng.clone();
+        let invalid_tls = invalid_tls.clone();
+        invalid_tls_tasks.push(tokio::spawn(async move {
+            let octet = ((idx % 200) + 1) as u8;
+            let peer = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(203, 0, 113, octet)), 46000 + idx);
+            handle_tls_handshake(
+                &invalid_tls,
+                tokio::io::empty(),
+                tokio::io::sink(),
+                peer,
+                &config,
+                &replay_checker,
+                &rng,
+                None,
+            )
+            .await
+        }));
+    }
+
+    let valid_tls_task = {
+        let config = config.clone();
+        let replay_checker = replay_checker.clone();
+        let rng = rng.clone();
+        let valid_tls = valid_tls.clone();
+        tokio::spawn(async move {
+            handle_tls_handshake(
+                &valid_tls,
+                tokio::io::empty(),
+                tokio::io::sink(),
+                "198.51.100.108:45108".parse().unwrap(),
+                &config,
+                &replay_checker,
+                &rng,
+                None,
+            )
+            .await
+        })
+    };
+
+    let valid_mtproto_task = {
+        let config = config.clone();
+        let replay_checker = replay_checker.clone();
+        let valid_mtproto = valid_mtproto.clone();
+        tokio::spawn(async move {
+            handle_mtproto_handshake(
+                &valid_mtproto,
+                tokio::io::empty(),
+                tokio::io::sink(),
+                "198.51.100.109:45109".parse().unwrap(),
+                &config,
+                &replay_checker,
+                false,
+                None,
+            )
+            .await
+        })
+    };
+
+    let mut bad_clients = 0usize;
+    for task in invalid_tls_tasks {
+        match task.await.unwrap() {
+            HandshakeResult::BadClient { .. } => bad_clients += 1,
+            HandshakeResult::Success(_) => panic!("invalid TLS probe unexpectedly authenticated"),
+            HandshakeResult::Error(err) => panic!("unexpected error in invalid TLS saturation burst test: {err}"),
+        }
+    }
+
+    let valid_tls_result = valid_tls_task.await.unwrap();
+    assert!(
+        matches!(valid_tls_result, HandshakeResult::Success(_)),
+        "valid TLS probe must authenticate during saturation burst"
+    );
+
+    let valid_mtproto_result = valid_mtproto_task.await.unwrap();
+    assert!(
+        matches!(valid_mtproto_result, HandshakeResult::Success(_)),
+        "valid MTProto probe must authenticate during saturation burst"
+    );
+
+    assert_eq!(
+        bad_clients,
+        48,
+        "all invalid TLS probes in mixed saturation burst must be rejected"
+    );
+}
+
+#[tokio::test]
+async fn expired_saturation_keeps_per_ip_throttle_enforced_for_valid_tls() {
+    let _guard = auth_probe_test_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    clear_auth_probe_state_for_testing();
+
+    let secret = [0x67u8; 16];
+    let config = test_config_with_secret_hex("67676767676767676767676767676767");
+    let replay_checker = ReplayChecker::new(128, Duration::from_secs(60));
+    let rng = SecureRandom::new();
+    let peer: SocketAddr = "198.51.100.110:45110".parse().unwrap();
+    let now = Instant::now();
+
+    auth_probe_state_map().insert(
+        normalize_auth_probe_ip(peer.ip()),
+        AuthProbeState {
+            fail_streak: AUTH_PROBE_BACKOFF_START_FAILS,
+            blocked_until: now + Duration::from_secs(5),
+            last_seen: now,
+        },
+    );
+    {
+        let mut guard = auth_probe_saturation_state()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        *guard = Some(AuthProbeSaturationState {
+            fail_streak: AUTH_PROBE_BACKOFF_START_FAILS,
+            blocked_until: now + Duration::from_secs(5),
+            last_seen: now - Duration::from_secs(AUTH_PROBE_TRACK_RETENTION_SECS + 1),
+        });
+    }
+
+    let valid = make_valid_tls_handshake(&secret, 0);
+    let result = handle_tls_handshake(
+        &valid,
+        tokio::io::empty(),
+        tokio::io::sink(),
+        peer,
+        &config,
+        &replay_checker,
+        &rng,
+        None,
+    )
+    .await;
+
+    assert!(
+        matches!(result, HandshakeResult::BadClient { .. }),
+        "expired saturation marker must not disable per-ip pre-auth throttle"
     );
 }
