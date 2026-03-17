@@ -436,6 +436,19 @@ impl ConnRegistry {
             .map(|s| s.is_empty())
             .unwrap_or(true)
     }
+
+    pub(super) async fn non_empty_writer_ids(&self, writer_ids: &[u64]) -> HashSet<u64> {
+        let inner = self.inner.read().await;
+        let mut out = HashSet::<u64>::with_capacity(writer_ids.len());
+        for writer_id in writer_ids {
+            if let Some(conns) = inner.conns_for_writer.get(writer_id)
+                && !conns.is_empty()
+            {
+                out.insert(*writer_id);
+            }
+        }
+        out
+    }
 }
 
 #[cfg(test)]
@@ -633,5 +646,36 @@ mod tests {
                 .await
         );
         assert!(registry.get_writer(conn_id).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn non_empty_writer_ids_returns_only_writers_with_bound_clients() {
+        let registry = ConnRegistry::new();
+        let (conn_id, _rx) = registry.register().await;
+        let (writer_tx_a, _writer_rx_a) = tokio::sync::mpsc::channel(8);
+        let (writer_tx_b, _writer_rx_b) = tokio::sync::mpsc::channel(8);
+        registry.register_writer(10, writer_tx_a).await;
+        registry.register_writer(20, writer_tx_b).await;
+
+        let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 443);
+        assert!(
+            registry
+                .bind_writer(
+                    conn_id,
+                    10,
+                    ConnMeta {
+                        target_dc: 2,
+                        client_addr: addr,
+                        our_addr: addr,
+                        proto_flags: 0,
+                    },
+                )
+                .await
+        );
+
+        let non_empty = registry.non_empty_writer_ids(&[10, 20, 30]).await;
+        assert!(non_empty.contains(&10));
+        assert!(!non_empty.contains(&20));
+        assert!(!non_empty.contains(&30));
     }
 }

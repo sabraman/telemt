@@ -514,6 +514,7 @@ impl MePool {
                 let was_draining = w.draining.load(Ordering::Relaxed);
                 if was_draining {
                     self.stats.decrement_pool_drain_active();
+                    self.decrement_draining_active_runtime();
                 }
                 self.stats.increment_me_writer_removed_total();
                 w.cancel.cancel();
@@ -572,6 +573,7 @@ impl MePool {
                     .store(drain_deadline_epoch_secs, Ordering::Relaxed);
                 if !already_draining {
                     self.stats.increment_pool_drain_active();
+                    self.increment_draining_active_runtime();
                 }
                 w.contour
                     .store(WriterContour::Draining.as_u8(), Ordering::Relaxed);

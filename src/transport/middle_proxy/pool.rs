@@ -160,6 +160,7 @@ pub struct MePool {
     pub(super) refill_inflight: Arc<Mutex<HashSet<RefillEndpointKey>>>,
     pub(super) refill_inflight_dc: Arc<Mutex<HashSet<RefillDcKey>>>,
     pub(super) conn_count: AtomicUsize,
+    pub(super) draining_active_runtime: AtomicU64,
     pub(super) stats: Arc<crate::stats::Stats>,
     pub(super) generation: AtomicU64,
     pub(super) active_generation: AtomicU64,
@@ -438,6 +439,7 @@ impl MePool {
             refill_inflight: Arc::new(Mutex::new(HashSet::new())),
             refill_inflight_dc: Arc::new(Mutex::new(HashSet::new())),
             conn_count: AtomicUsize::new(0),
+            draining_active_runtime: AtomicU64::new(0),
             generation: AtomicU64::new(1),
             active_generation: AtomicU64::new(1),
             warm_generation: AtomicU64::new(0),
@@ -687,6 +689,32 @@ impl MePool {
             None
         } else {
             Some(Duration::from_secs(secs))
+        }
+    }
+
+    pub(super) fn draining_active_runtime(&self) -> u64 {
+        self.draining_active_runtime.load(Ordering::Relaxed)
+    }
+
+    pub(super) fn increment_draining_active_runtime(&self) {
+        self.draining_active_runtime.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub(super) fn decrement_draining_active_runtime(&self) {
+        let mut current = self.draining_active_runtime.load(Ordering::Relaxed);
+        loop {
+            if current == 0 {
+                break;
+            }
+            match self.draining_active_runtime.compare_exchange_weak(
+                current,
+                current - 1,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => break,
+                Err(actual) => current = actual,
+            }
         }
     }
 
