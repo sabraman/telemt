@@ -31,16 +31,19 @@ struct UserConnectionReservation {
     user: String,
     ip: IpAddr,
     active: bool,
+    runtime_handle: Option<tokio::runtime::Handle>,
 }
 
 impl UserConnectionReservation {
     fn new(stats: Arc<Stats>, ip_tracker: Arc<UserIpTracker>, user: String, ip: IpAddr) -> Self {
+        let runtime_handle = tokio::runtime::Handle::try_current().ok();
         Self {
             stats,
             ip_tracker,
             user,
             ip,
             active: true,
+            runtime_handle,
         }
     }
 
@@ -62,7 +65,15 @@ impl Drop for UserConnectionReservation {
         self.active = false;
         self.stats.decrement_user_curr_connects(&self.user);
 
-        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+        if let Some(handle) = &self.runtime_handle {
+            let ip_tracker = self.ip_tracker.clone();
+            let user = self.user.clone();
+            let ip = self.ip;
+            let handle = handle.clone();
+            handle.spawn(async move {
+                ip_tracker.remove_ip(&user, ip).await;
+            });
+        } else if let Ok(handle) = tokio::runtime::Handle::try_current() {
             let ip_tracker = self.ip_tracker.clone();
             let user = self.user.clone();
             let ip = self.ip;
