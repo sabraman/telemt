@@ -437,6 +437,23 @@ impl ConnRegistry {
             .unwrap_or(true)
     }
 
+    pub async fn unregister_writer_if_empty(&self, writer_id: u64) -> bool {
+        let mut inner = self.inner.write().await;
+        let Some(conn_ids) = inner.conns_for_writer.get(&writer_id) else {
+            // Writer is already absent from the registry.
+            return true;
+        };
+        if !conn_ids.is_empty() {
+            return false;
+        }
+
+        inner.writers.remove(&writer_id);
+        inner.last_meta_for_writer.remove(&writer_id);
+        inner.writer_idle_since_epoch_secs.remove(&writer_id);
+        inner.conns_for_writer.remove(&writer_id);
+        true
+    }
+
     pub(super) async fn non_empty_writer_ids(&self, writer_ids: &[u64]) -> HashSet<u64> {
         let inner = self.inner.read().await;
         let mut out = HashSet::<u64>::with_capacity(writer_ids.len());

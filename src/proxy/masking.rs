@@ -7,7 +7,7 @@ use tokio::net::TcpStream;
 #[cfg(unix)]
 use tokio::net::UnixStream;
 use tokio::io::{AsyncRead, AsyncWrite, AsyncReadExt, AsyncWriteExt};
-use tokio::time::timeout;
+use tokio::time::{Instant, timeout};
 use tracing::debug;
 use crate::config::ProxyConfig;
 use crate::network::dns_overrides::resolve_socket_addr;
@@ -46,6 +46,20 @@ where
 {
     if timeout(MASK_RELAY_TIMEOUT, consume_client_data(reader)).await.is_err() {
         debug!("Timed out while consuming client data on masking fallback path");
+    }
+}
+
+async fn wait_mask_connect_budget(started: Instant) {
+    let elapsed = started.elapsed();
+    if elapsed < MASK_TIMEOUT {
+        tokio::time::sleep(MASK_TIMEOUT - elapsed).await;
+    }
+}
+
+async fn wait_mask_outcome_budget(started: Instant) {
+    let elapsed = started.elapsed();
+    if elapsed < MASK_TIMEOUT {
+        tokio::time::sleep(MASK_TIMEOUT - elapsed).await;
     }
 }
 
@@ -107,6 +121,8 @@ where
     // Connect via Unix socket or TCP
     #[cfg(unix)]
     if let Some(ref sock_path) = config.censorship.mask_unix_sock {
+        let outcome_started = Instant::now();
+        let connect_started = Instant::now();
         debug!(
             client_type = client_type,
             sock = %sock_path,
@@ -143,14 +159,18 @@ where
                 if timeout(MASK_RELAY_TIMEOUT, relay_to_mask(reader, writer, mask_read, mask_write, initial_data)).await.is_err() {
                     debug!("Mask relay timed out (unix socket)");
                 }
+                wait_mask_outcome_budget(outcome_started).await;
             }
             Ok(Err(e)) => {
+                wait_mask_connect_budget(connect_started).await;
                 debug!(error = %e, "Failed to connect to mask unix socket");
                 consume_client_data_with_timeout(reader).await;
+                wait_mask_outcome_budget(outcome_started).await;
             }
             Err(_) => {
                 debug!("Timeout connecting to mask unix socket");
                 consume_client_data_with_timeout(reader).await;
+                wait_mask_outcome_budget(outcome_started).await;
             }
         }
         return;
@@ -172,6 +192,8 @@ where
     let mask_addr = resolve_socket_addr(mask_host, mask_port)
         .map(|addr| addr.to_string())
         .unwrap_or_else(|| format!("{}:{}", mask_host, mask_port));
+    let outcome_started = Instant::now();
+    let connect_started = Instant::now();
     let connect_result = timeout(MASK_TIMEOUT, TcpStream::connect(&mask_addr)).await;
     match connect_result {
         Ok(Ok(stream)) => {
@@ -202,14 +224,18 @@ where
             if timeout(MASK_RELAY_TIMEOUT, relay_to_mask(reader, writer, mask_read, mask_write, initial_data)).await.is_err() {
                 debug!("Mask relay timed out");
             }
+            wait_mask_outcome_budget(outcome_started).await;
         }
         Ok(Err(e)) => {
+            wait_mask_connect_budget(connect_started).await;
             debug!(error = %e, "Failed to connect to mask host");
             consume_client_data_with_timeout(reader).await;
+            wait_mask_outcome_budget(outcome_started).await;
         }
         Err(_) => {
             debug!("Timeout connecting to mask host");
             consume_client_data_with_timeout(reader).await;
+            wait_mask_outcome_budget(outcome_started).await;
         }
     }
 }

@@ -239,7 +239,9 @@ pub(super) async fn reap_draining_writers(
         if !closed_writer_ids.insert(writer_id) {
             continue;
         }
-        pool.remove_writer_and_close_clients(writer_id).await;
+        if !pool.remove_writer_if_empty(writer_id).await {
+            continue;
+        }
         closed_total = closed_total.saturating_add(1);
     }
 

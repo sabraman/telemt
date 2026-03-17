@@ -8,7 +8,7 @@ use tokio::io::{duplex, AsyncBufReadExt, BufReader};
 use tokio::net::TcpListener;
 #[cfg(unix)]
 use tokio::net::UnixListener;
-use tokio::time::{sleep, timeout, Duration};
+use tokio::time::{Instant, sleep, timeout, Duration};
 
 #[tokio::test]
 async fn bad_client_probe_is_forwarded_verbatim_to_mask_backend() {
@@ -214,6 +214,372 @@ async fn backend_unavailable_falls_back_to_silent_consume() {
         .unwrap()
         .unwrap();
     assert_eq!(n, 0);
+}
+
+#[tokio::test]
+async fn backend_connect_refusal_waits_mask_connect_budget_before_fallback() {
+    let temp_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let unused_port = temp_listener.local_addr().unwrap().port();
+    drop(temp_listener);
+
+    let mut config = ProxyConfig::default();
+    config.general.beobachten = false;
+    config.censorship.mask = true;
+    config.censorship.mask_host = Some("127.0.0.1".to_string());
+    config.censorship.mask_port = unused_port;
+    config.censorship.mask_unix_sock = None;
+    config.censorship.mask_proxy_protocol = 0;
+
+    let peer: SocketAddr = "203.0.113.12:42426".parse().unwrap();
+    let local_addr: SocketAddr = "127.0.0.1:443".parse().unwrap();
+    let probe = b"GET /probe HTTP/1.1\r\nHost: x\r\n\r\n";
+
+    // Keep reader open so fallback path does not terminate immediately on EOF.
+    let (_client_reader_side, client_reader) = duplex(256);
+    let (_client_visible_reader, client_visible_writer) = duplex(256);
+    let beobachten = BeobachtenStore::new();
+
+    let started = Instant::now();
+    let task = tokio::spawn(async move {
+        handle_bad_client(
+            client_reader,
+            client_visible_writer,
+            probe,
+            peer,
+            local_addr,
+            &config,
+            &beobachten,
+        )
+        .await;
+    });
+
+    timeout(Duration::from_millis(35), task)
+        .await
+        .expect_err("masking fallback must not complete before connect budget elapses");
+    assert!(
+        started.elapsed() >= Duration::from_millis(35),
+        "fallback path must absorb immediate connect refusal into connect budget"
+    );
+}
+
+#[tokio::test]
+async fn backend_reachable_fast_response_waits_mask_outcome_budget() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let backend_addr = listener.local_addr().unwrap();
+    let probe = b"GET /ok HTTP/1.1\r\nHost: front.example\r\n\r\n".to_vec();
+    let backend_reply = b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\n\r\n".to_vec();
+
+    let accept_task = tokio::spawn({
+        let probe = probe.clone();
+        let backend_reply = backend_reply.clone();
+        async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut received = vec![0u8; probe.len()];
+            stream.read_exact(&mut received).await.unwrap();
+            assert_eq!(received, probe);
+            stream.write_all(&backend_reply).await.unwrap();
+        }
+    });
+
+    let mut config = ProxyConfig::default();
+    config.general.beobachten = false;
+    config.censorship.mask = true;
+    config.censorship.mask_host = Some("127.0.0.1".to_string());
+    config.censorship.mask_port = backend_addr.port();
+    config.censorship.mask_unix_sock = None;
+    config.censorship.mask_proxy_protocol = 0;
+
+    let peer: SocketAddr = "203.0.113.13:42427".parse().unwrap();
+    let local_addr: SocketAddr = "127.0.0.1:443".parse().unwrap();
+
+    let (client_writer_side, client_reader) = duplex(256);
+    drop(client_writer_side);
+    let (_client_visible_reader, client_visible_writer) = duplex(512);
+    let beobachten = BeobachtenStore::new();
+
+    let started = Instant::now();
+    handle_bad_client(
+        client_reader,
+        client_visible_writer,
+        &probe,
+        peer,
+        local_addr,
+        &config,
+        &beobachten,
+    )
+    .await;
+
+    assert!(
+        started.elapsed() >= Duration::from_millis(45),
+        "reachable mask path must also satisfy coarse outcome budget"
+    );
+    accept_task.await.unwrap();
+}
+
+#[tokio::test]
+async fn mask_disabled_fast_eof_not_shaped_by_mask_budget() {
+    let mut config = ProxyConfig::default();
+    config.general.beobachten = false;
+    config.censorship.mask = false;
+
+    let peer: SocketAddr = "203.0.113.14:42428".parse().unwrap();
+    let local_addr: SocketAddr = "127.0.0.1:443".parse().unwrap();
+
+    let (client_writer_side, client_reader) = duplex(256);
+    drop(client_writer_side);
+    let (_client_visible_reader, client_visible_writer) = duplex(256);
+    let beobachten = BeobachtenStore::new();
+
+    let started = Instant::now();
+    handle_bad_client(
+        client_reader,
+        client_visible_writer,
+        b"x",
+        peer,
+        local_addr,
+        &config,
+        &beobachten,
+    )
+    .await;
+
+    assert!(
+        started.elapsed() < Duration::from_millis(20),
+        "mask-disabled fallback should keep immediate EOF behavior"
+    );
+}
+
+#[tokio::test]
+async fn backend_reachable_slow_response_not_padded_twice() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let backend_addr = listener.local_addr().unwrap();
+    let probe = b"GET /slow HTTP/1.1\r\nHost: front.example\r\n\r\n".to_vec();
+    let backend_reply = b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nOK".to_vec();
+
+    let accept_task = tokio::spawn({
+        let probe = probe.clone();
+        let backend_reply = backend_reply.clone();
+        async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut received = vec![0u8; probe.len()];
+            stream.read_exact(&mut received).await.unwrap();
+            assert_eq!(received, probe);
+            sleep(Duration::from_millis(90)).await;
+            stream.write_all(&backend_reply).await.unwrap();
+        }
+    });
+
+    let mut config = ProxyConfig::default();
+    config.general.beobachten = false;
+    config.censorship.mask = true;
+    config.censorship.mask_host = Some("127.0.0.1".to_string());
+    config.censorship.mask_port = backend_addr.port();
+    config.censorship.mask_unix_sock = None;
+    config.censorship.mask_proxy_protocol = 0;
+
+    let peer: SocketAddr = "203.0.113.15:42429".parse().unwrap();
+    let local_addr: SocketAddr = "127.0.0.1:443".parse().unwrap();
+
+    let (client_writer_side, client_reader) = duplex(256);
+    drop(client_writer_side);
+    let (_client_visible_reader, client_visible_writer) = duplex(512);
+    let beobachten = BeobachtenStore::new();
+
+    let started = Instant::now();
+    handle_bad_client(
+        client_reader,
+        client_visible_writer,
+        &probe,
+        peer,
+        local_addr,
+        &config,
+        &beobachten,
+    )
+    .await;
+    let elapsed = started.elapsed();
+
+    assert!(elapsed >= Duration::from_millis(85));
+    assert!(
+        elapsed < Duration::from_millis(170),
+        "slow reachable backend should not incur an extra full budget after already exceeding it"
+    );
+    accept_task.await.unwrap();
+}
+
+#[tokio::test]
+async fn adversarial_enabled_refused_and_reachable_collapse_to_same_bucket() {
+    const ITER: usize = 20;
+    const BUCKET_MS: u128 = 10;
+
+    let probe = b"GET /collapse HTTP/1.1\r\nHost: x\r\n\r\n";
+    let peer: SocketAddr = "203.0.113.16:42430".parse().unwrap();
+    let local_addr: SocketAddr = "127.0.0.1:443".parse().unwrap();
+
+    let mut refused = Vec::with_capacity(ITER);
+    for _ in 0..ITER {
+        let temp_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let unused_port = temp_listener.local_addr().unwrap().port();
+        drop(temp_listener);
+
+        let mut config = ProxyConfig::default();
+        config.general.beobachten = false;
+        config.censorship.mask = true;
+        config.censorship.mask_host = Some("127.0.0.1".to_string());
+        config.censorship.mask_port = unused_port;
+        config.censorship.mask_unix_sock = None;
+        config.censorship.mask_proxy_protocol = 0;
+
+        let (client_writer_side, client_reader) = duplex(256);
+        drop(client_writer_side);
+        let (_client_visible_reader, client_visible_writer) = duplex(256);
+        let beobachten = BeobachtenStore::new();
+
+        let started = Instant::now();
+        handle_bad_client(
+            client_reader,
+            client_visible_writer,
+            probe,
+            peer,
+            local_addr,
+            &config,
+            &beobachten,
+        )
+        .await;
+        refused.push(started.elapsed().as_millis());
+    }
+
+    let mut reachable = Vec::with_capacity(ITER);
+    for _ in 0..ITER {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let backend_addr = listener.local_addr().unwrap();
+        let probe_vec = probe.to_vec();
+        let backend_reply = b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\n\r\n".to_vec();
+
+        let accept_task = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut received = vec![0u8; probe_vec.len()];
+            stream.read_exact(&mut received).await.unwrap();
+            stream.write_all(&backend_reply).await.unwrap();
+        });
+
+        let mut config = ProxyConfig::default();
+        config.general.beobachten = false;
+        config.censorship.mask = true;
+        config.censorship.mask_host = Some("127.0.0.1".to_string());
+        config.censorship.mask_port = backend_addr.port();
+        config.censorship.mask_unix_sock = None;
+        config.censorship.mask_proxy_protocol = 0;
+
+        let (client_writer_side, client_reader) = duplex(256);
+        drop(client_writer_side);
+        let (_client_visible_reader, client_visible_writer) = duplex(256);
+        let beobachten = BeobachtenStore::new();
+
+        let started = Instant::now();
+        handle_bad_client(
+            client_reader,
+            client_visible_writer,
+            probe,
+            peer,
+            local_addr,
+            &config,
+            &beobachten,
+        )
+        .await;
+        reachable.push(started.elapsed().as_millis());
+        accept_task.await.unwrap();
+    }
+
+    let refused_mean = refused.iter().copied().sum::<u128>() as f64 / refused.len() as f64;
+    let reachable_mean = reachable.iter().copied().sum::<u128>() as f64 / reachable.len() as f64;
+    let refused_bucket = (refused_mean as u128) / BUCKET_MS;
+    let reachable_bucket = (reachable_mean as u128) / BUCKET_MS;
+
+    assert!(
+        refused_bucket.abs_diff(reachable_bucket) <= 1,
+        "enabled refused and reachable paths must collapse into the same coarse latency bucket"
+    );
+}
+
+#[tokio::test]
+async fn light_fuzz_mask_enabled_outcomes_preserve_coarse_budget() {
+    let mut seed: u64 = 0xA5A5_5A5A_1337_4242;
+    let mut next = || {
+        seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
+        seed
+    };
+
+    let peer: SocketAddr = "203.0.113.17:42431".parse().unwrap();
+    let local_addr: SocketAddr = "127.0.0.1:443".parse().unwrap();
+
+    for _ in 0..40 {
+        let probe_len = (next() as usize % 96).saturating_add(8);
+        let mut probe = vec![0u8; probe_len];
+        for byte in &mut probe {
+            *byte = next() as u8;
+        }
+
+        let use_reachable = (next() & 1) == 0;
+        let mut config = ProxyConfig::default();
+        config.general.beobachten = false;
+        config.censorship.mask = true;
+        config.censorship.mask_unix_sock = None;
+        config.censorship.mask_proxy_protocol = 0;
+
+        let (client_writer_side, client_reader) = duplex(512);
+        drop(client_writer_side);
+        let (_client_visible_reader, client_visible_writer) = duplex(512);
+        let beobachten = BeobachtenStore::new();
+
+        let started = Instant::now();
+        if use_reachable {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let backend_addr = listener.local_addr().unwrap();
+            config.censorship.mask_host = Some("127.0.0.1".to_string());
+            config.censorship.mask_port = backend_addr.port();
+
+            let probe_vec = probe.clone();
+            let accept_task = tokio::spawn(async move {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut observed = vec![0u8; probe_vec.len()];
+                stream.read_exact(&mut observed).await.unwrap();
+            });
+
+            handle_bad_client(
+                client_reader,
+                client_visible_writer,
+                &probe,
+                peer,
+                local_addr,
+                &config,
+                &beobachten,
+            )
+            .await;
+            accept_task.await.unwrap();
+        } else {
+            let temp_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let unused_port = temp_listener.local_addr().unwrap().port();
+            drop(temp_listener);
+
+            config.censorship.mask_host = Some("127.0.0.1".to_string());
+            config.censorship.mask_port = unused_port;
+
+            handle_bad_client(
+                client_reader,
+                client_visible_writer,
+                &probe,
+                peer,
+                local_addr,
+                &config,
+                &beobachten,
+            )
+            .await;
+        }
+
+        assert!(
+            started.elapsed() >= Duration::from_millis(45),
+            "mask-enabled fallback must preserve coarse timing budget under varied probe shapes"
+        );
+    }
 }
 
 #[tokio::test]
@@ -728,4 +1094,159 @@ async fn relay_to_mask_timeout_cancels_and_drops_all_io_endpoints() {
     assert!(writer_dropped.load(Ordering::SeqCst));
     assert!(mask_reader_dropped.load(Ordering::SeqCst));
     assert!(mask_writer_dropped.load(Ordering::SeqCst));
+}
+
+#[tokio::test]
+#[ignore = "timing matrix; run manually with --ignored --nocapture"]
+async fn timing_matrix_masking_classes_under_controlled_inputs() {
+    const ITER: usize = 24;
+    const BUCKET_MS: u128 = 10;
+
+    let probe = b"GET /timing HTTP/1.1\r\nHost: x\r\n\r\n";
+    let peer: SocketAddr = "203.0.113.40:51000".parse().unwrap();
+    let local_addr: SocketAddr = "127.0.0.1:443".parse().unwrap();
+
+    // Class 1: masking disabled with immediate EOF (fast fail-closed consume path).
+    let mut disabled_samples = Vec::with_capacity(ITER);
+    for _ in 0..ITER {
+        let mut config = ProxyConfig::default();
+        config.general.beobachten = false;
+        config.censorship.mask = false;
+
+        let (client_writer_side, client_reader) = duplex(256);
+        drop(client_writer_side);
+        let (_client_visible_reader, client_visible_writer) = duplex(256);
+        let beobachten = BeobachtenStore::new();
+
+        let started = Instant::now();
+        handle_bad_client(
+            client_reader,
+            client_visible_writer,
+            probe,
+            peer,
+            local_addr,
+            &config,
+            &beobachten,
+        )
+        .await;
+        disabled_samples.push(started.elapsed().as_millis());
+    }
+
+    // Class 2: masking enabled, backend connect refused.
+    let mut refused_samples = Vec::with_capacity(ITER);
+    for _ in 0..ITER {
+        let temp_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let unused_port = temp_listener.local_addr().unwrap().port();
+        drop(temp_listener);
+
+        let mut config = ProxyConfig::default();
+        config.general.beobachten = false;
+        config.censorship.mask = true;
+        config.censorship.mask_host = Some("127.0.0.1".to_string());
+        config.censorship.mask_port = unused_port;
+        config.censorship.mask_unix_sock = None;
+        config.censorship.mask_proxy_protocol = 0;
+
+        let (client_writer_side, client_reader) = duplex(256);
+        drop(client_writer_side);
+        let (_client_visible_reader, client_visible_writer) = duplex(256);
+        let beobachten = BeobachtenStore::new();
+
+        let started = Instant::now();
+        handle_bad_client(
+            client_reader,
+            client_visible_writer,
+            probe,
+            peer,
+            local_addr,
+            &config,
+            &beobachten,
+        )
+        .await;
+        refused_samples.push(started.elapsed().as_millis());
+    }
+
+    // Class 3: masking enabled, backend reachable and immediately responds.
+    let mut reachable_samples = Vec::with_capacity(ITER);
+    for _ in 0..ITER {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let backend_addr = listener.local_addr().unwrap();
+        let backend_reply = b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\n\r\n".to_vec();
+        let probe_vec = probe.to_vec();
+
+        let accept_task = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut received = vec![0u8; probe_vec.len()];
+            stream.read_exact(&mut received).await.unwrap();
+            assert_eq!(received, probe_vec);
+            stream.write_all(&backend_reply).await.unwrap();
+        });
+
+        let mut config = ProxyConfig::default();
+        config.general.beobachten = false;
+        config.censorship.mask = true;
+        config.censorship.mask_host = Some("127.0.0.1".to_string());
+        config.censorship.mask_port = backend_addr.port();
+        config.censorship.mask_unix_sock = None;
+        config.censorship.mask_proxy_protocol = 0;
+
+        let (client_writer_side, client_reader) = duplex(256);
+        drop(client_writer_side);
+        let (_client_visible_reader, client_visible_writer) = duplex(256);
+        let beobachten = BeobachtenStore::new();
+
+        let started = Instant::now();
+        handle_bad_client(
+            client_reader,
+            client_visible_writer,
+            probe,
+            peer,
+            local_addr,
+            &config,
+            &beobachten,
+        )
+        .await;
+        reachable_samples.push(started.elapsed().as_millis());
+        accept_task.await.unwrap();
+    }
+
+    fn summarize(samples_ms: &mut [u128]) -> (f64, u128, u128, u128) {
+        samples_ms.sort_unstable();
+        let sum: u128 = samples_ms.iter().copied().sum();
+        let mean = sum as f64 / samples_ms.len() as f64;
+        let min = samples_ms[0];
+        let p95_idx = ((samples_ms.len() as f64) * 0.95).floor() as usize;
+        let p95 = samples_ms[p95_idx.min(samples_ms.len() - 1)];
+        let max = samples_ms[samples_ms.len() - 1];
+        (mean, min, p95, max)
+    }
+
+    let (disabled_mean, disabled_min, disabled_p95, disabled_max) = summarize(&mut disabled_samples);
+    let (refused_mean, refused_min, refused_p95, refused_max) = summarize(&mut refused_samples);
+    let (reachable_mean, reachable_min, reachable_p95, reachable_max) = summarize(&mut reachable_samples);
+
+    println!(
+        "TIMING_MATRIX masking class=disabled_eof mean_ms={:.2} min_ms={} p95_ms={} max_ms={} bucket_mean={}",
+        disabled_mean,
+        disabled_min,
+        disabled_p95,
+        disabled_max,
+        (disabled_mean as u128) / BUCKET_MS
+    );
+    println!(
+        "TIMING_MATRIX masking class=enabled_refused_eof mean_ms={:.2} min_ms={} p95_ms={} max_ms={} bucket_mean={}",
+        refused_mean,
+        refused_min,
+        refused_p95,
+        refused_max,
+        (refused_mean as u128) / BUCKET_MS
+    );
+    println!(
+        "TIMING_MATRIX masking class=enabled_reachable_eof mean_ms={:.2} min_ms={} p95_ms={} max_ms={} bucket_mean={}",
+        reachable_mean,
+        reachable_min,
+        reachable_p95,
+        reachable_max,
+        (reachable_mean as u128) / BUCKET_MS
+    );
 }

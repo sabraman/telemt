@@ -317,6 +317,24 @@ fn decode_user_secrets(
     secrets
 }
 
+async fn maybe_apply_server_hello_delay(config: &ProxyConfig) {
+    if config.censorship.server_hello_delay_max_ms == 0 {
+        return;
+    }
+
+    let min = config.censorship.server_hello_delay_min_ms;
+    let max = config.censorship.server_hello_delay_max_ms.max(min);
+    let delay_ms = if max == min {
+        max
+    } else {
+        rand::rng().random_range(min..=max)
+    };
+
+    if delay_ms > 0 {
+        tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+    }
+}
+
 /// Result of successful handshake
 ///
 /// Key material (`dec_key`, `dec_iv`, `enc_key`, `enc_iv`) is
@@ -368,11 +386,13 @@ where
     debug!(peer = %peer, handshake_len = handshake.len(), "Processing TLS handshake");
 
     if auth_probe_is_throttled(peer.ip(), Instant::now()) {
+        maybe_apply_server_hello_delay(config).await;
         debug!(peer = %peer, "TLS handshake rejected by pre-auth probe throttle");
         return HandshakeResult::BadClient { reader, writer };
     }
 
     if handshake.len() < tls::TLS_DIGEST_POS + tls::TLS_DIGEST_LEN + 1 {
+        maybe_apply_server_hello_delay(config).await;
         debug!(peer = %peer, "TLS handshake too short");
         return HandshakeResult::BadClient { reader, writer };
     }
@@ -388,6 +408,7 @@ where
         Some(v) => v,
         None => {
             auth_probe_record_failure(peer.ip(), Instant::now());
+            maybe_apply_server_hello_delay(config).await;
             debug!(
                 peer = %peer, 
                 ignore_time_skew = config.access.ignore_time_skew,
@@ -402,13 +423,17 @@ where
     let digest_half = &validation.digest[..tls::TLS_DIGEST_HALF_LEN];
     if replay_checker.check_and_add_tls_digest(digest_half) {
         auth_probe_record_failure(peer.ip(), Instant::now());
+        maybe_apply_server_hello_delay(config).await;
         warn!(peer = %peer, "TLS replay attack detected (duplicate digest)");
         return HandshakeResult::BadClient { reader, writer };
     }
 
     let secret = match secrets.iter().find(|(name, _)| *name == validation.user) {
         Some((_, s)) => s,
-        None => return HandshakeResult::BadClient { reader, writer },
+        None => {
+            maybe_apply_server_hello_delay(config).await;
+            return HandshakeResult::BadClient { reader, writer };
+        }
     };
 
     let cached = if config.censorship.tls_emulation {
@@ -448,6 +473,7 @@ where
         } else if alpn_list.iter().any(|p| p == b"http/1.1") {
             Some(b"http/1.1".to_vec())
         } else if !alpn_list.is_empty() {
+            maybe_apply_server_hello_delay(config).await;
             debug!(peer = %peer, "Client ALPN list has no supported protocol; using masking fallback");
             return HandshakeResult::BadClient { reader, writer };
         } else {
@@ -480,19 +506,9 @@ where
         )
     };
 
-    // Optional anti-fingerprint delay before sending ServerHello.
-    if config.censorship.server_hello_delay_max_ms > 0 {
-        let min = config.censorship.server_hello_delay_min_ms;
-        let max = config.censorship.server_hello_delay_max_ms.max(min);
-        let delay_ms = if max == min {
-            max
-        } else {
-            rand::rng().random_range(min..=max)
-        };
-        if delay_ms > 0 {
-            tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
-        }
-    }
+    // Apply the same optional delay budget used by reject paths to reduce
+    // distinguishability between success and fail-closed handshakes.
+    maybe_apply_server_hello_delay(config).await;
 
     debug!(peer = %peer, response_len = response.len(), "Sending TLS ServerHello");
 
@@ -539,6 +555,7 @@ where
     trace!(peer = %peer, handshake = ?hex::encode(handshake), "MTProto handshake bytes");
 
     if auth_probe_is_throttled(peer.ip(), Instant::now()) {
+        maybe_apply_server_hello_delay(config).await;
         debug!(peer = %peer, "MTProto handshake rejected by pre-auth probe throttle");
         return HandshakeResult::BadClient { reader, writer };
     }
@@ -609,6 +626,7 @@ where
     // authentication check first to avoid poisoning the replay cache.
         if replay_checker.check_and_add_handshake(dec_prekey_iv) {
             auth_probe_record_failure(peer.ip(), Instant::now());
+            maybe_apply_server_hello_delay(config).await;
             warn!(peer = %peer, user = %user, "MTProto replay attack detected");
             return HandshakeResult::BadClient { reader, writer };
         }
@@ -645,6 +663,7 @@ where
     }
 
     auth_probe_record_failure(peer.ip(), Instant::now());
+    maybe_apply_server_hello_delay(config).await;
     debug!(peer = %peer, "MTProto handshake: no matching user found");
     HandshakeResult::BadClient { reader, writer }
 }

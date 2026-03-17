@@ -592,3 +592,67 @@ async fn reap_draining_writers_mixed_backlog_converges_without_leaking_warn_stat
 fn general_config_default_drain_threshold_remains_enabled() {
     assert_eq!(GeneralConfig::default().me_pool_drain_threshold, 128);
 }
+
+#[tokio::test]
+async fn reap_draining_writers_does_not_close_writer_that_became_non_empty_after_snapshot() {
+    let pool = make_pool(128).await;
+    let now_epoch_secs = MePool::now_epoch_secs();
+
+    let empty_writer_id = 700u64;
+    insert_draining_writer(
+        &pool,
+        empty_writer_id,
+        now_epoch_secs.saturating_sub(60),
+        0,
+        0,
+    )
+    .await;
+
+    let stale_empty_snapshot = vec![empty_writer_id];
+    let (rebound_conn_id, _rx) = pool.registry.register().await;
+    assert!(
+        pool.registry
+            .bind_writer(
+                rebound_conn_id,
+                empty_writer_id,
+                ConnMeta {
+                    target_dc: 2,
+                    client_addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 9050),
+                    our_addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 443),
+                    proto_flags: 0,
+                },
+            )
+            .await,
+        "writer should accept a new bind after stale empty snapshot"
+    );
+
+    for writer_id in stale_empty_snapshot {
+        assert!(
+            !pool.remove_writer_if_empty(writer_id).await,
+            "atomic empty cleanup must reject writers that gained bound clients"
+        );
+    }
+
+    assert!(
+        writer_exists(&pool, empty_writer_id).await,
+        "empty-path cleanup must not remove a writer that gained a bound client"
+    );
+    assert_eq!(
+        pool.registry.get_writer(rebound_conn_id).await.map(|w| w.writer_id),
+        Some(empty_writer_id)
+    );
+
+    let _ = pool.registry.unregister(rebound_conn_id).await;
+}
+
+#[tokio::test]
+async fn prune_closed_writers_closes_bound_clients_when_writer_is_non_empty() {
+    let pool = make_pool(128).await;
+    let now_epoch_secs = MePool::now_epoch_secs();
+    let conn_ids = insert_draining_writer(&pool, 910, now_epoch_secs.saturating_sub(60), 1, 0).await;
+
+    pool.prune_closed_writers().await;
+
+    assert!(!writer_exists(&pool, 910).await);
+    assert!(pool.registry.get_writer(conn_ids[0]).await.is_none());
+}

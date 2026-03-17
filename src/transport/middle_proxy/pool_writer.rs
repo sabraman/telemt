@@ -42,11 +42,10 @@ impl MePool {
         }
 
         for writer_id in closed_writer_ids {
-            if self.registry.is_writer_empty(writer_id).await {
-                let _ = self.remove_writer_only(writer_id).await;
-            } else {
-                let _ = self.remove_writer_and_close_clients(writer_id).await;
+            if self.remove_writer_if_empty(writer_id).await {
+                continue;
             }
+            let _ = self.remove_writer_and_close_clients(writer_id).await;
         }
     }
 
@@ -499,6 +498,17 @@ impl MePool {
             let _ = self.registry.route(bound.conn_id, super::MeResponse::Close).await;
             let _ = self.registry.unregister(bound.conn_id).await;
         }
+    }
+
+    pub(crate) async fn remove_writer_if_empty(self: &Arc<Self>, writer_id: u64) -> bool {
+        if !self.registry.unregister_writer_if_empty(writer_id).await {
+            return false;
+        }
+
+        // The registry empty-check and unregister are atomic with respect to binds,
+        // so remove_writer_only cannot return active bound sessions here.
+        let _ = self.remove_writer_only(writer_id).await;
+        true
     }
 
     async fn remove_writer_only(self: &Arc<Self>, writer_id: u64) -> Vec<BoundConn> {

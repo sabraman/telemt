@@ -581,6 +581,72 @@ async fn malformed_tls_classes_complete_within_bounded_time() {
 }
 
 #[tokio::test]
+async fn tls_invalid_hmac_respects_configured_anti_fingerprint_delay() {
+    let secret = [0x5Au8; 16];
+    let mut config = test_config_with_secret_hex("5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a");
+    config.censorship.server_hello_delay_min_ms = 20;
+    config.censorship.server_hello_delay_max_ms = 20;
+
+    let replay_checker = ReplayChecker::new(128, Duration::from_secs(60));
+    let rng = SecureRandom::new();
+    let peer: SocketAddr = "198.51.100.32:44331".parse().unwrap();
+    let mut bad_hmac = make_valid_tls_handshake(&secret, 0);
+    bad_hmac[tls::TLS_DIGEST_POS] ^= 0x01;
+
+    let started = Instant::now();
+    let result = handle_tls_handshake(
+        &bad_hmac,
+        tokio::io::empty(),
+        tokio::io::sink(),
+        peer,
+        &config,
+        &replay_checker,
+        &rng,
+        None,
+    )
+    .await;
+
+    assert!(matches!(result, HandshakeResult::BadClient { .. }));
+    assert!(
+        started.elapsed() >= Duration::from_millis(18),
+        "configured anti-fingerprint delay must apply to invalid TLS handshakes"
+    );
+}
+
+#[tokio::test]
+async fn tls_alpn_mismatch_respects_configured_anti_fingerprint_delay() {
+    let secret = [0x6Bu8; 16];
+    let mut config = test_config_with_secret_hex("6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b");
+    config.censorship.alpn_enforce = true;
+    config.censorship.server_hello_delay_min_ms = 20;
+    config.censorship.server_hello_delay_max_ms = 20;
+
+    let replay_checker = ReplayChecker::new(128, Duration::from_secs(60));
+    let rng = SecureRandom::new();
+    let peer: SocketAddr = "198.51.100.33:44332".parse().unwrap();
+    let handshake = make_valid_tls_client_hello_with_alpn(&secret, 0, &[b"h3"]);
+
+    let started = Instant::now();
+    let result = handle_tls_handshake(
+        &handshake,
+        tokio::io::empty(),
+        tokio::io::sink(),
+        peer,
+        &config,
+        &replay_checker,
+        &rng,
+        None,
+    )
+    .await;
+
+    assert!(matches!(result, HandshakeResult::BadClient { .. }));
+    assert!(
+        started.elapsed() >= Duration::from_millis(18),
+        "configured anti-fingerprint delay must apply to ALPN-mismatch rejects"
+    );
+}
+
+#[tokio::test]
 #[ignore = "timing-sensitive; run manually on low-jitter hosts"]
 async fn malformed_tls_classes_share_close_latency_buckets() {
     const ITER: usize = 24;
@@ -641,6 +707,82 @@ async fn malformed_tls_classes_share_close_latency_buckets() {
         "Malformed TLS classes diverged across latency buckets: means_ms={:?}",
         class_means_ms
     );
+}
+
+#[tokio::test]
+#[ignore = "timing matrix; run manually with --ignored --nocapture"]
+async fn timing_matrix_tls_classes_under_fixed_delay_budget() {
+    const ITER: usize = 48;
+    const BUCKET_MS: u128 = 10;
+
+    let secret = [0x77u8; 16];
+    let mut config = test_config_with_secret_hex("77777777777777777777777777777777");
+    config.censorship.alpn_enforce = true;
+    config.censorship.server_hello_delay_min_ms = 20;
+    config.censorship.server_hello_delay_max_ms = 20;
+
+    let rng = SecureRandom::new();
+    let base_ip = std::net::Ipv4Addr::new(198, 51, 100, 34);
+
+    let too_short = vec![0x16, 0x03, 0x01];
+    let mut bad_hmac = make_valid_tls_handshake(&secret, 0);
+    bad_hmac[tls::TLS_DIGEST_POS + 1] ^= 0x01;
+    let alpn_mismatch = make_valid_tls_client_hello_with_alpn(&secret, 0, &[b"h3"]);
+    let valid_h2 = make_valid_tls_client_hello_with_alpn(&secret, 0, &[b"h2"]);
+
+    let classes = vec![
+        ("too_short", too_short),
+        ("bad_hmac", bad_hmac),
+        ("alpn_mismatch", alpn_mismatch),
+        ("valid_h2", valid_h2),
+    ];
+
+    for (class, probe) in classes {
+        let mut samples_ms = Vec::with_capacity(ITER);
+        for idx in 0..ITER {
+            clear_auth_probe_state_for_testing();
+            let replay_checker = ReplayChecker::new(4096, Duration::from_secs(60));
+            let peer: SocketAddr = SocketAddr::from((base_ip, 44_000 + idx as u16));
+            let started = Instant::now();
+            let result = handle_tls_handshake(
+                &probe,
+                tokio::io::empty(),
+                tokio::io::sink(),
+                peer,
+                &config,
+                &replay_checker,
+                &rng,
+                None,
+            )
+            .await;
+            let elapsed = started.elapsed();
+            samples_ms.push(elapsed.as_millis());
+
+            if class == "valid_h2" {
+                assert!(matches!(result, HandshakeResult::Success(_)));
+            } else {
+                assert!(matches!(result, HandshakeResult::BadClient { .. }));
+            }
+        }
+
+        samples_ms.sort_unstable();
+        let sum: u128 = samples_ms.iter().copied().sum();
+        let mean = sum as f64 / samples_ms.len() as f64;
+        let min = samples_ms[0];
+        let p95_idx = ((samples_ms.len() as f64) * 0.95).floor() as usize;
+        let p95 = samples_ms[p95_idx.min(samples_ms.len() - 1)];
+        let max = samples_ms[samples_ms.len() - 1];
+
+        println!(
+            "TIMING_MATRIX tls class={} mean_ms={:.2} min_ms={} p95_ms={} max_ms={} bucket_mean={}",
+            class,
+            mean,
+            min,
+            p95,
+            max,
+            (mean as u128) / BUCKET_MS
+        );
+    }
 }
 
 #[test]
