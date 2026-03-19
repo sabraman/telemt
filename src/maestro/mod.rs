@@ -484,7 +484,7 @@ pub async fn run() -> std::result::Result<(), Box<dyn std::error::Error>> {
         Duration::from_secs(config.access.replay_window_secs),
     ));
 
-    let buffer_pool = Arc::new(BufferPool::with_config(16 * 1024, 4096));
+    let buffer_pool = Arc::new(BufferPool::with_config(64 * 1024, 4096));
 
     connectivity::run_startup_connectivity(
         &config,

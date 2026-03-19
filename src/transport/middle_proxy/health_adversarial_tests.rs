@@ -83,6 +83,11 @@ async fn make_pool(
         general.hardswap,
         general.me_pool_drain_ttl_secs,
         general.me_pool_drain_threshold,
+        general.me_pool_drain_soft_evict_enabled,
+        general.me_pool_drain_soft_evict_grace_secs,
+        general.me_pool_drain_soft_evict_per_writer,
+        general.me_pool_drain_soft_evict_budget_per_core,
+        general.me_pool_drain_soft_evict_cooldown_ms,
         general.effective_me_pool_force_close_secs(),
         general.me_pool_min_fresh_ratio,
         general.me_hardswap_warmup_delay_min_ms,
@@ -107,6 +112,8 @@ async fn make_pool(
         general.me_warn_rate_limit_ms,
         MeRouteNoWriterMode::default(),
         general.me_route_no_writer_wait_ms,
+        general.me_route_hybrid_max_wait_ms,
+        general.me_route_blocking_send_timeout_ms,
         general.me_route_inline_recovery_attempts,
         general.me_route_inline_recovery_wait_ms,
     );
@@ -220,10 +227,11 @@ async fn set_writer_runtime_state(
 async fn reap_draining_writers_clears_warn_state_when_pool_empty() {
     let (pool, _rng) = make_pool(128, 1, 1).await;
     let mut warn_next_allowed = HashMap::new();
+    let mut soft_evict_next_allowed = HashMap::new();
     warn_next_allowed.insert(11, Instant::now() + Duration::from_secs(5));
     warn_next_allowed.insert(22, Instant::now() + Duration::from_secs(5));
 
-    reap_draining_writers(&pool, &mut warn_next_allowed).await;
+    reap_draining_writers(&pool, &mut warn_next_allowed, &mut soft_evict_next_allowed).await;
 
     assert!(warn_next_allowed.is_empty());
 }
@@ -232,6 +240,8 @@ async fn reap_draining_writers_clears_warn_state_when_pool_empty() {
 async fn reap_draining_writers_respects_threshold_across_multiple_overflow_cycles() {
     let threshold = 3u64;
     let (pool, _rng) = make_pool(threshold, 1, 1).await;
+    pool.me_pool_drain_soft_evict_enabled
+        .store(false, Ordering::Relaxed);
     let now_epoch_secs = MePool::now_epoch_secs();
 
     for writer_id in 1..=60u64 {
@@ -246,8 +256,9 @@ async fn reap_draining_writers_respects_threshold_across_multiple_overflow_cycle
     }
 
     let mut warn_next_allowed = HashMap::new();
+    let mut soft_evict_next_allowed = HashMap::new();
     for _ in 0..64 {
-        reap_draining_writers(&pool, &mut warn_next_allowed).await;
+        reap_draining_writers(&pool, &mut warn_next_allowed, &mut soft_evict_next_allowed).await;
         if writer_count(&pool).await <= threshold as usize {
             break;
         }
@@ -275,11 +286,12 @@ async fn reap_draining_writers_handles_large_empty_writer_population() {
     }
 
     let mut warn_next_allowed = HashMap::new();
+    let mut soft_evict_next_allowed = HashMap::new();
     for _ in 0..24 {
         if writer_count(&pool).await == 0 {
             break;
         }
-        reap_draining_writers(&pool, &mut warn_next_allowed).await;
+        reap_draining_writers(&pool, &mut warn_next_allowed, &mut soft_evict_next_allowed).await;
     }
 
     assert_eq!(writer_count(&pool).await, 0);
@@ -303,11 +315,12 @@ async fn reap_draining_writers_processes_mass_deadline_expiry_without_unbounded_
     }
 
     let mut warn_next_allowed = HashMap::new();
+    let mut soft_evict_next_allowed = HashMap::new();
     for _ in 0..40 {
         if writer_count(&pool).await == 0 {
             break;
         }
-        reap_draining_writers(&pool, &mut warn_next_allowed).await;
+        reap_draining_writers(&pool, &mut warn_next_allowed, &mut soft_evict_next_allowed).await;
     }
 
     assert_eq!(writer_count(&pool).await, 0);
@@ -318,6 +331,7 @@ async fn reap_draining_writers_maintains_warn_state_subset_property_under_bulk_c
     let (pool, _rng) = make_pool(128, 1, 1).await;
     let now_epoch_secs = MePool::now_epoch_secs();
     let mut warn_next_allowed = HashMap::new();
+    let mut soft_evict_next_allowed = HashMap::new();
 
     for wave in 0..40u64 {
         for offset in 0..8u64 {
@@ -331,7 +345,7 @@ async fn reap_draining_writers_maintains_warn_state_subset_property_under_bulk_c
             .await;
         }
 
-        reap_draining_writers(&pool, &mut warn_next_allowed).await;
+        reap_draining_writers(&pool, &mut warn_next_allowed, &mut soft_evict_next_allowed).await;
         assert!(warn_next_allowed.len() <= writer_count(&pool).await);
 
         let ids = sorted_writer_ids(&pool).await;
@@ -339,7 +353,7 @@ async fn reap_draining_writers_maintains_warn_state_subset_property_under_bulk_c
             let _ = pool.remove_writer_and_close_clients(writer_id).await;
         }
 
-        reap_draining_writers(&pool, &mut warn_next_allowed).await;
+        reap_draining_writers(&pool, &mut warn_next_allowed, &mut soft_evict_next_allowed).await;
         assert!(warn_next_allowed.len() <= writer_count(&pool).await);
     }
 }
@@ -361,9 +375,10 @@ async fn reap_draining_writers_budgeted_cleanup_never_increases_pool_size() {
     }
 
     let mut warn_next_allowed = HashMap::new();
+    let mut soft_evict_next_allowed = HashMap::new();
     let mut previous = writer_count(&pool).await;
     for _ in 0..32 {
-        reap_draining_writers(&pool, &mut warn_next_allowed).await;
+        reap_draining_writers(&pool, &mut warn_next_allowed, &mut soft_evict_next_allowed).await;
         let current = writer_count(&pool).await;
         assert!(current <= previous);
         previous = current;
