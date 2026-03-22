@@ -94,7 +94,8 @@ then Ctrl+S -> Ctrl+X to save
 
 > [!WARNING]
 > Replace the value of the hello parameter with the value you obtained in step 0. 
-> Replace the value of the tls_domain parameter with another website.
+> Replace the value of the tls_domain parameter with a real HTTPS site that is plausible for your server's region and hosting provider.
+> If you set `mask_host`, keep it aligned with the same donor unless you intentionally route masking traffic elsewhere.
 
 ---
 

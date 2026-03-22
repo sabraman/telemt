@@ -245,7 +245,7 @@ This document lists all configuration keys accepted by `config.toml`.
 
 | Parameter | Type | Default | Constraints / validation | Description |
 |---|---|---|---|---|
-| tls_domain | `String` | `"petrovich.ru"` | — | Primary TLS domain used in fake TLS handshake profile. |
+| tls_domain | `String` | `"petrovich.ru"` | — | Primary TLS domain used in the fake TLS handshake profile. Choose a real HTTPS site that is plausible for your server's region/provider; when `mask_host` is unset it also becomes the default masking upstream host. |
 | tls_domains | `String[]` | `[]` | — | Additional TLS domains for generating multiple links. |
 | mask | `bool` | `true` | — | Enables masking/fronting relay mode. |
 | mask_host | `String \| null` | `null` | — | Upstream mask host for TLS fronting relay. |
