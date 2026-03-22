@@ -108,7 +108,7 @@ Notes:
 | `GET` | `/v1/users/{username}` | none | `200` | `UserInfo` |
 | `PATCH` | `/v1/users/{username}` | `PatchUserRequest` | `200` | `UserInfo` |
 | `DELETE` | `/v1/users/{username}` | none | `200` | `string` (deleted username) |
-| `POST` | `/v1/users/{username}/rotate-secret` | `RotateSecretRequest` or empty body | `404` | `ErrorResponse` (`not_found`, current runtime behavior) |
+| `POST` | `/v1/users/{username}/rotate-secret` | `RotateSecretRequest` or empty body | `200` | `CreateUserResponse` |
 
 ## Common Error Codes
 
@@ -118,7 +118,7 @@ Notes:
 | `401` | `unauthorized` | Missing/invalid `Authorization` when `auth_header` is configured. |
 | `403` | `forbidden` | Source IP is not allowed by whitelist. |
 | `403` | `read_only` | Mutating endpoint called while `read_only=true`. |
-| `404` | `not_found` | Unknown route, unknown user, or unsupported sub-route (including current `rotate-secret` route). |
+| `404` | `not_found` | Unknown route, unknown user, or unsupported sub-route. |
 | `405` | `method_not_allowed` | Unsupported method for `/v1/users/{username}` route shape. |
 | `409` | `revision_conflict` | `If-Match` revision mismatch. |
 | `409` | `user_exists` | User already exists on create. |
@@ -133,10 +133,10 @@ Notes:
 | --- | --- |
 | Path matching | Exact match on `req.uri().path()`. Query string does not affect route matching. |
 | Trailing slash | Not normalized. Example: `/v1/users/` is `404`. |
-| Username route with extra slash | `/v1/users/{username}/...` is not treated as user route and returns `404`. |
+| Username route with extra slash | Unsupported `/v1/users/{username}/...` sub-routes return `404`. `POST /v1/users/{username}/rotate-secret` is the only supported extra path segment under the username route. |
 | `PUT /v1/users/{username}` | `405 method_not_allowed`. |
 | `POST /v1/users/{username}` | `404 not_found`. |
-| `POST /v1/users/{username}/rotate-secret` | `404 not_found` in current release due route matcher limitation. |
+| `POST /v1/users/{username}/rotate-secret` | Supported. Returns `200` with `CreateUserResponse`; missing user still returns `404 not_found`. |
 
 ## Body and JSON Semantics
 
@@ -1058,7 +1058,7 @@ Link generation uses active config and enabled modes:
 | --- | --- |
 | `POST /v1/users` | Creates user, validates config, then atomically updates only affected `access.*` TOML tables (`access.users` always, plus optional per-user tables present in request). |
 | `PATCH /v1/users/{username}` | Partial update of provided fields only. Missing fields remain unchanged. Current implementation persists full config document on success. |
-| `POST /v1/users/{username}/rotate-secret` | Currently returns `404` in runtime route matcher; request schema is reserved for intended behavior. |
+| `POST /v1/users/{username}/rotate-secret` | Rotates the user's secret. If `secret` is omitted in the request body, a new 32-hex secret is generated. Returns updated `UserInfo` plus the effective secret in `CreateUserResponse`. |
 | `DELETE /v1/users/{username}` | Deletes only specified user, removes this user from related optional `access.user_*` maps, blocks last-user deletion, and atomically updates only related `access.*` TOML tables. |
 
 All mutating endpoints:
@@ -1133,5 +1133,4 @@ When `general.use_middle_proxy=true` and `general.me2dc_fallback=true`:
 
 ## Known Limitations (Current Release)
 
-- `POST /v1/users/{username}/rotate-secret` is currently unreachable in route matcher and returns `404`.
 - API runtime controls under `server.api` are documented as restart-required; hot-reload behavior for these fields is not strictly uniform in all change combinations.
