@@ -186,8 +186,6 @@ fn generate_config(username: &str, secret: &str, port: u16, domain: &str) -> Str
         r#"# Telemt MTProxy — auto-generated config
 # Re-run `telemt --init` to regenerate
 
-show_link = ["{username}"]
-
 [general]
 # prefer_ipv6 is deprecated; use [network].prefer
 prefer_ipv6 = false
@@ -218,6 +216,9 @@ multipath = false
 classic = false
 secure = false
 tls = true
+
+[general.links]
+show = ["{username}"]
 
 [server]
 port = {port}
