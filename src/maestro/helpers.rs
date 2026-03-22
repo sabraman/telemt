@@ -49,7 +49,7 @@ pub(crate) fn parse_cli() -> (String, Option<PathBuf>, bool, Option<String>) {
         match args[i].as_str() {
             "--data-path" => {
                 i += 1;
-                if i < args.len() {
+                if i < args.len() && !args[i].starts_with('-') {
                     data_path = Some(PathBuf::from(args[i].clone()));
                 } else {
                     eprintln!("Missing value for --data-path");
@@ -66,7 +66,7 @@ pub(crate) fn parse_cli() -> (String, Option<PathBuf>, bool, Option<String>) {
             }
             "--log-level" => {
                 i += 1;
-                if i < args.len() {
+                if i < args.len() && !args[i].starts_with('-') {
                     log_level = Some(args[i].clone());
                 } else {
                     eprintln!("Missing value for --log-level");
