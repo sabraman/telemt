@@ -7,11 +7,17 @@ use std::process::Command;
 
 /// Options for the init command
 pub struct InitOptions {
+    /// Listen port for the generated proxy configuration.
     pub port: u16,
+    /// TLS masking domain written into the generated configuration.
     pub domain: String,
+    /// Optional user-provided MTProxy secret in hex form.
     pub secret: Option<String>,
+    /// Username inserted into the generated access configuration.
     pub username: String,
+    /// Destination directory for the generated config file.
     pub config_dir: PathBuf,
+    /// Skips starting the service after installation.
     pub no_start: bool,
 }
 
@@ -265,6 +271,16 @@ weight = 10
 }
 
 fn generate_systemd_unit(exe_path: &Path, config_path: &Path) -> String {
+    let exe = exe_path
+        .display()
+        .to_string()
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"");
+    let config = config_path
+        .display()
+        .to_string()
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"");
     format!(
         r#"[Unit]
 Description=Telemt MTProxy
@@ -274,7 +290,7 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart={exe} {config}
+ExecStart="{exe}" "{config}"
 Restart=always
 RestartSec=5
 LimitNOFILE=65535
@@ -287,9 +303,7 @@ PrivateTmp=true
 
 [Install]
 WantedBy=multi-user.target
-"#,
-        exe = exe_path.display(),
-        config = config_path.display(),
+"#
     )
 }
 
