@@ -31,6 +31,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     binutils \
     curl \
     ca-certificates \
+    xz-utils \
     && rm -rf /var/lib/apt/lists/* \
     \
     # install UPX from Telemt releases
@@ -62,6 +63,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
     iproute2 \
     busybox \
+    libgcc-s1 \
     && rm -rf /var/lib/apt/lists/*
 
 # ==========================
@@ -86,7 +88,7 @@ CMD ["config.toml"]
 # ==========================
 # Stage 5: Production (distroless)
 # ==========================
-FROM gcr.io/distroless/base-debian12 AS prod
+FROM gcr.io/distroless/cc-debian12 AS prod
 
 WORKDIR /app
 
