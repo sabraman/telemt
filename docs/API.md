@@ -183,8 +183,6 @@ Notes:
 | --- | --- | --- | --- |
 | `secret` | `string` | no | Exactly 32 hex chars. If missing, generated automatically. |
 
-Note: the request contract is defined, but the corresponding route currently returns `404` (see routing edge cases).
-
 ## Response Data Contracts
 
 ### `HealthData`
