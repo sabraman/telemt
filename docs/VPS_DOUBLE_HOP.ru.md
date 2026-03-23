@@ -44,7 +44,7 @@ awg genkey | tee private.key | awg pubkey > public.key
 
 Параметры обфускации `S1`, `S2`, `H1`, `H2`, `H3`, `H4` должны быть строго идентичными на обоих серверах.\
 Параметры `Jc`, `Jmin` и `Jmax` могут отличатся.\
-Параметры `I1-I5` [(Custom Protocol Signature)](https://docs.amnezia.org/documentation/amnezia-wg/) нужно указывать на стороне _клиента_ (Сервер **А**).
+Параметры `I1-I5` ([Custom Protocol Signature](https://docs.amnezia.org/documentation/amnezia-wg/)) нужно указывать на стороне _клиента_ (Сервер **А**).
 
 Рекомендации по выбору значений:
 ```text
@@ -62,7 +62,7 @@ H1/H2/H3/H4 — должны быть уникальны и отличаться
 ```
 > [!IMPORTANT]
 > Рекомендуется использовать собственные, уникальные значения.\
-> Для выбора параметров можете воспользоваться [генератором](https://htmlpreview.github.io/?https://gist.githubusercontent.com/avbor/955782b5c37b06240b243aa375baeac5/raw/e8b269ff0089a27effd88f8d925179b78e5666c4/awg-gen.html).
+> Для выбора параметров можете воспользоваться [генератором](https://htmlpreview.github.io/?https://gist.githubusercontent.com/avbor/955782b5c37b06240b243aa375baeac5/raw/13f5517ca473b47c412b9a99407066de973732bd/awg-gen.html).
 
 #### Конфигурация Сервера B (_Нидерланды_):
 
@@ -83,6 +83,8 @@ Jmin = 8
 Jmax = 80
 S1 = 29
 S2 = 15
+S3 = 18
+S4 = 0
 H1 = 2087563914
 H2 = 188817757
 H3 = 101784570
@@ -121,6 +123,8 @@ Jmin = 8
 Jmax = 80
 S1 = 29
 S2 = 15
+S3 = 18
+S4 = 0
 H1 = 2087563914
 H2 = 188817757
 H3 = 101784570
@@ -272,7 +276,7 @@ backend telemt_nodes
 
 ```
 >[!WARNING]
->**Файл должен заканчиваться пустой строкой, иначе HAProxy не запуститься!**
+>**Файл должен заканчиваться пустой строкой, иначе HAProxy не запустится!**
 
 #### Разрешаем порт 443\tcp в фаерволе (если включен)
 ```bash
