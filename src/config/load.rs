@@ -346,9 +346,9 @@ impl ProxyConfig {
             ));
         }
 
-        if config.timeouts.tg_connect == 0 {
+        if config.general.tg_connect == 0 {
             return Err(ProxyError::Config(
-                "timeouts.tg_connect must be > 0".to_string(),
+                "general.tg_connect must be > 0".to_string(),
             ));
         }
 
@@ -1916,7 +1916,7 @@ mod tests {
     #[test]
     fn tg_connect_zero_is_rejected() {
         let toml = r#"
-            [timeouts]
+            [general]
             tg_connect = 0
 
             [censorship]
@@ -1929,7 +1929,7 @@ mod tests {
         let path = dir.join("telemt_tg_connect_zero_test.toml");
         std::fs::write(&path, toml).unwrap();
         let err = ProxyConfig::load(&path).unwrap_err().to_string();
-        assert!(err.contains("timeouts.tg_connect must be > 0"));
+        assert!(err.contains("general.tg_connect must be > 0"));
         let _ = std::fs::remove_file(path);
     }
 

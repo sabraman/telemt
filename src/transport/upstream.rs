@@ -317,7 +317,7 @@ pub struct UpstreamManager {
     connect_retry_attempts: u32,
     connect_retry_backoff: Duration,
     connect_budget: Duration,
-    /// Per-attempt TCP connect timeout to Telegram DC (`[timeouts] tg_connect`, seconds).
+    /// Per-attempt TCP connect timeout to Telegram DC (`[general] tg_connect`, seconds).
     tg_connect_timeout_secs: u64,
     unhealthy_fail_threshold: u32,
     connect_failfast_hard_errors: bool,
@@ -799,8 +799,8 @@ impl UpstreamManager {
                 break;
             }
             let remaining_budget = self.connect_budget.saturating_sub(elapsed);
-            let attempt_timeout = Duration::from_secs(self.tg_connect_timeout_secs)
-                .min(remaining_budget);
+            let attempt_timeout =
+                Duration::from_secs(self.tg_connect_timeout_secs).min(remaining_budget);
             if attempt_timeout.is_zero() {
                 last_error = Some(ProxyError::ConnectionTimeout {
                     addr: target.to_string(),

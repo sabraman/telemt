@@ -207,6 +207,7 @@ me_pool_drain_soft_evict_cooldown_ms = 1000
 me_bind_stale_mode = "never"
 me_pool_min_fresh_ratio = 0.8
 me_reinit_drain_timeout_secs = 90
+tg_connect = 10
 
 [network]
 ipv4 = true
@@ -233,7 +234,6 @@ ip = "::"
 
 [timeouts]
 client_handshake = 15
-tg_connect = 10
 client_keepalive = 60
 client_ack = 300
 
