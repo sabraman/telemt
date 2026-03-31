@@ -37,12 +37,12 @@ mod runtime_watch;
 mod runtime_zero;
 mod users;
 
-use config_store::{current_revision, parse_if_match};
+use config_store::{current_revision, load_config_from_disk, parse_if_match};
 use events::ApiEventStore;
 use http_utils::{error_response, read_json, read_optional_json, success_response};
 use model::{
-    ApiFailure, CreateUserRequest, HealthData, PatchUserRequest, RotateSecretRequest, SummaryData,
-    UserActiveIps,
+    ApiFailure, CreateUserRequest, DeleteUserResponse, HealthData, PatchUserRequest,
+    RotateSecretRequest, SummaryData, UserActiveIps,
 };
 use runtime_edge::{
     EdgeConnectionsCacheEntry, build_runtime_connections_summary_data,
@@ -380,13 +380,16 @@ async fn handle(
             }
             ("GET", "/v1/stats/users") | ("GET", "/v1/users") => {
                 let revision = current_revision(&shared.config_path).await?;
+                let disk_cfg = load_config_from_disk(&shared.config_path).await?;
+                let runtime_cfg = config_rx.borrow().clone();
                 let (detected_ip_v4, detected_ip_v6) = shared.detected_link_ips();
                 let users = users_from_config(
-                    &cfg,
+                    &disk_cfg,
                     &shared.stats,
                     &shared.ip_tracker,
                     detected_ip_v4,
                     detected_ip_v6,
+                    Some(runtime_cfg.as_ref()),
                 )
                 .await;
                 Ok(success_response(StatusCode::OK, users, revision))
@@ -405,7 +408,7 @@ async fn handle(
                 let expected_revision = parse_if_match(req.headers());
                 let body = read_json::<CreateUserRequest>(req.into_body(), body_limit).await?;
                 let result = create_user(body, expected_revision, &shared).await;
-                let (data, revision) = match result {
+                let (mut data, revision) = match result {
                     Ok(ok) => ok,
                     Err(error) => {
                         shared
@@ -414,11 +417,18 @@ async fn handle(
                         return Err(error);
                     }
                 };
+                let runtime_cfg = config_rx.borrow().clone();
+                data.user.in_runtime = runtime_cfg.access.users.contains_key(&data.user.username);
                 shared.runtime_events.record(
                     "api.user.create.ok",
                     format!("username={}", data.user.username),
                 );
-                Ok(success_response(StatusCode::CREATED, data, revision))
+                let status = if data.user.in_runtime {
+                    StatusCode::CREATED
+                } else {
+                    StatusCode::ACCEPTED
+                };
+                Ok(success_response(status, data, revision))
             }
             _ => {
                 if let Some(user) = path.strip_prefix("/v1/users/")
@@ -427,13 +437,16 @@ async fn handle(
                 {
                     if method == Method::GET {
                         let revision = current_revision(&shared.config_path).await?;
+                        let disk_cfg = load_config_from_disk(&shared.config_path).await?;
+                        let runtime_cfg = config_rx.borrow().clone();
                         let (detected_ip_v4, detected_ip_v6) = shared.detected_link_ips();
                         let users = users_from_config(
-                            &cfg,
+                            &disk_cfg,
                             &shared.stats,
                             &shared.ip_tracker,
                             detected_ip_v4,
                             detected_ip_v6,
+                            Some(runtime_cfg.as_ref()),
                         )
                         .await;
                         if let Some(user_info) =
@@ -461,7 +474,7 @@ async fn handle(
                         let body =
                             read_json::<PatchUserRequest>(req.into_body(), body_limit).await?;
                         let result = patch_user(user, body, expected_revision, &shared).await;
-                        let (data, revision) = match result {
+                        let (mut data, revision) = match result {
                             Ok(ok) => ok,
                             Err(error) => {
                                 shared.runtime_events.record(
@@ -471,10 +484,17 @@ async fn handle(
                                 return Err(error);
                             }
                         };
+                        let runtime_cfg = config_rx.borrow().clone();
+                        data.in_runtime = runtime_cfg.access.users.contains_key(&data.username);
                         shared
                             .runtime_events
                             .record("api.user.patch.ok", format!("username={}", data.username));
-                        return Ok(success_response(StatusCode::OK, data, revision));
+                        let status = if data.in_runtime {
+                            StatusCode::OK
+                        } else {
+                            StatusCode::ACCEPTED
+                        };
+                        return Ok(success_response(status, data, revision));
                     }
                     if method == Method::DELETE {
                         if api_cfg.read_only {
@@ -502,7 +522,18 @@ async fn handle(
                         shared
                             .runtime_events
                             .record("api.user.delete.ok", format!("username={}", deleted_user));
-                        return Ok(success_response(StatusCode::OK, deleted_user, revision));
+                        let runtime_cfg = config_rx.borrow().clone();
+                        let in_runtime = runtime_cfg.access.users.contains_key(&deleted_user);
+                        let response = DeleteUserResponse {
+                            username: deleted_user,
+                            in_runtime,
+                        };
+                        let status = if response.in_runtime {
+                            StatusCode::ACCEPTED
+                        } else {
+                            StatusCode::OK
+                        };
+                        return Ok(success_response(status, response, revision));
                     }
                     if method == Method::POST
                         && let Some(base_user) = user.strip_suffix("/rotate-secret")
@@ -530,7 +561,7 @@ async fn handle(
                             &shared,
                         )
                         .await;
-                        let (data, revision) = match result {
+                        let (mut data, revision) = match result {
                             Ok(ok) => ok,
                             Err(error) => {
                                 shared.runtime_events.record(
@@ -540,11 +571,19 @@ async fn handle(
                                 return Err(error);
                             }
                         };
+                        let runtime_cfg = config_rx.borrow().clone();
+                        data.user.in_runtime =
+                            runtime_cfg.access.users.contains_key(&data.user.username);
                         shared.runtime_events.record(
                             "api.user.rotate_secret.ok",
                             format!("username={}", base_user),
                         );
-                        return Ok(success_response(StatusCode::OK, data, revision));
+                        let status = if data.user.in_runtime {
+                            StatusCode::OK
+                        } else {
+                            StatusCode::ACCEPTED
+                        };
+                        return Ok(success_response(status, data, revision));
                     }
                     if method == Method::POST {
                         return Ok(error_response(

@@ -136,6 +136,7 @@ pub(super) async fn create_user(
         &shared.ip_tracker,
         detected_ip_v4,
         detected_ip_v6,
+        None,
     )
     .await;
     let user = users
@@ -143,6 +144,7 @@ pub(super) async fn create_user(
         .find(|entry| entry.username == body.username)
         .unwrap_or(UserInfo {
             username: body.username.clone(),
+            in_runtime: false,
             user_ad_tag: None,
             max_tcp_conns: cfg
                 .access
@@ -243,6 +245,7 @@ pub(super) async fn patch_user(
         &shared.ip_tracker,
         detected_ip_v4,
         detected_ip_v6,
+        None,
     )
     .await;
     let user_info = users
@@ -300,6 +303,7 @@ pub(super) async fn rotate_secret(
         &shared.ip_tracker,
         detected_ip_v4,
         detected_ip_v6,
+        None,
     )
     .await;
     let user_info = users
@@ -372,6 +376,7 @@ pub(super) async fn users_from_config(
     ip_tracker: &UserIpTracker,
     startup_detected_ip_v4: Option<IpAddr>,
     startup_detected_ip_v6: Option<IpAddr>,
+    runtime_cfg: Option<&ProxyConfig>,
 ) -> Vec<UserInfo> {
     let mut names = cfg.access.users.keys().cloned().collect::<Vec<_>>();
     names.sort();
@@ -401,6 +406,9 @@ pub(super) async fn users_from_config(
                 tls: Vec::new(),
             });
         users.push(UserInfo {
+            in_runtime: runtime_cfg
+                .map(|runtime| runtime.access.users.contains_key(&username))
+                .unwrap_or(false),
             user_ad_tag: cfg.access.user_ad_tags.get(&username).cloned(),
             max_tcp_conns: cfg
                 .access
@@ -605,35 +613,75 @@ mod tests {
         let stats = Stats::new();
         let tracker = UserIpTracker::new();
 
-        let users = users_from_config(&cfg, &stats, &tracker, None, None).await;
+        let users = users_from_config(&cfg, &stats, &tracker, None, None, None).await;
         let alice = users
             .iter()
             .find(|entry| entry.username == "alice")
             .expect("alice must be present");
+        assert!(!alice.in_runtime);
         assert_eq!(alice.max_tcp_conns, Some(7));
 
         cfg.access.user_max_tcp_conns.insert("alice".to_string(), 5);
-        let users = users_from_config(&cfg, &stats, &tracker, None, None).await;
+        let users = users_from_config(&cfg, &stats, &tracker, None, None, None).await;
         let alice = users
             .iter()
             .find(|entry| entry.username == "alice")
             .expect("alice must be present");
+        assert!(!alice.in_runtime);
         assert_eq!(alice.max_tcp_conns, Some(5));
 
         cfg.access.user_max_tcp_conns.insert("alice".to_string(), 0);
-        let users = users_from_config(&cfg, &stats, &tracker, None, None).await;
+        let users = users_from_config(&cfg, &stats, &tracker, None, None, None).await;
         let alice = users
             .iter()
             .find(|entry| entry.username == "alice")
             .expect("alice must be present");
+        assert!(!alice.in_runtime);
         assert_eq!(alice.max_tcp_conns, Some(7));
 
         cfg.access.user_max_tcp_conns_global_each = 0;
-        let users = users_from_config(&cfg, &stats, &tracker, None, None).await;
+        let users = users_from_config(&cfg, &stats, &tracker, None, None, None).await;
         let alice = users
             .iter()
             .find(|entry| entry.username == "alice")
             .expect("alice must be present");
+        assert!(!alice.in_runtime);
         assert_eq!(alice.max_tcp_conns, None);
+    }
+
+    #[tokio::test]
+    async fn users_from_config_marks_runtime_membership_when_snapshot_is_provided() {
+        let mut disk_cfg = ProxyConfig::default();
+        disk_cfg.access.users.insert(
+            "alice".to_string(),
+            "0123456789abcdef0123456789abcdef".to_string(),
+        );
+        disk_cfg.access.users.insert(
+            "bob".to_string(),
+            "fedcba9876543210fedcba9876543210".to_string(),
+        );
+
+        let mut runtime_cfg = ProxyConfig::default();
+        runtime_cfg.access.users.insert(
+            "alice".to_string(),
+            "0123456789abcdef0123456789abcdef".to_string(),
+        );
+
+        let stats = Stats::new();
+        let tracker = UserIpTracker::new();
+        let users =
+            users_from_config(&disk_cfg, &stats, &tracker, None, None, Some(&runtime_cfg)).await;
+
+        let alice = users
+            .iter()
+            .find(|entry| entry.username == "alice")
+            .expect("alice must be present");
+        let bob = users
+            .iter()
+            .find(|entry| entry.username == "bob")
+            .expect("bob must be present");
+
+        assert!(alice.in_runtime);
+        assert!(!bob.in_runtime);
     }
 }
