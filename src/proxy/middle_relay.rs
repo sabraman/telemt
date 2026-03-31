@@ -1199,9 +1199,13 @@ where
                 user = %user,
                 "Middle-relay pressure eviction for idle-candidate session"
             );
-            let _ =
-                enqueue_c2me_command(&c2me_tx, C2MeCommand::Close, c2me_send_timeout, stats.as_ref())
-                    .await;
+            let _ = enqueue_c2me_command(
+                &c2me_tx,
+                C2MeCommand::Close,
+                c2me_send_timeout,
+                stats.as_ref(),
+            )
+            .await;
             main_result = Err(ProxyError::Proxy(
                 "middle-relay session evicted under pressure (idle-candidate)".to_string(),
             ));
@@ -1220,9 +1224,13 @@ where
                 "Cutover affected middle session, closing client connection"
             );
             tokio::time::sleep(delay).await;
-            let _ =
-                enqueue_c2me_command(&c2me_tx, C2MeCommand::Close, c2me_send_timeout, stats.as_ref())
-                    .await;
+            let _ = enqueue_c2me_command(
+                &c2me_tx,
+                C2MeCommand::Close,
+                c2me_send_timeout,
+                stats.as_ref(),
+            )
+            .await;
             main_result = Err(ProxyError::Proxy(ROUTE_SWITCH_ERROR_MSG.to_string()));
             break;
         }

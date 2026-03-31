@@ -1436,8 +1436,7 @@ impl Stats {
 
     pub fn increment_me_c2me_send_full_total(&self) {
         if self.telemetry_me_allows_normal() {
-            self.me_c2me_send_full_total
-                .fetch_add(1, Ordering::Relaxed);
+            self.me_c2me_send_full_total.fetch_add(1, Ordering::Relaxed);
         }
     }
 
@@ -1838,13 +1837,11 @@ impl Stats {
     }
 
     pub fn get_me_c2me_send_high_water_total(&self) -> u64 {
-        self.me_c2me_send_high_water_total
-            .load(Ordering::Relaxed)
+        self.me_c2me_send_high_water_total.load(Ordering::Relaxed)
     }
 
     pub fn get_me_c2me_send_timeout_total(&self) -> u64 {
-        self.me_c2me_send_timeout_total
-            .load(Ordering::Relaxed)
+        self.me_c2me_send_timeout_total.load(Ordering::Relaxed)
     }
     pub fn get_me_d2c_batch_timeout_armed_total(&self) -> u64 {
         self.me_d2c_batch_timeout_armed_total
