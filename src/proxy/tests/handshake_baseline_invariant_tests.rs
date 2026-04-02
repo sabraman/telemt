@@ -36,16 +36,10 @@ fn make_valid_tls_handshake(secret: &[u8], timestamp: u32) -> Vec<u8> {
     handshake
 }
 
-fn test_lock_guard() -> std::sync::MutexGuard<'static, ()> {
-    auth_probe_test_lock()
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-}
-
 #[tokio::test]
 async fn handshake_baseline_probe_always_falls_back_to_masking() {
-    let _guard = test_lock_guard();
-    clear_auth_probe_state_for_testing();
+    let shared = ProxySharedState::new();
+    clear_auth_probe_state_for_testing_in_shared(shared.as_ref());
 
     let cfg = test_config_with_secret_hex("11111111111111111111111111111111");
     let replay_checker = ReplayChecker::new(64, Duration::from_secs(60));
@@ -70,8 +64,8 @@ async fn handshake_baseline_probe_always_falls_back_to_masking() {
 
 #[tokio::test]
 async fn handshake_baseline_invalid_secret_triggers_fallback_not_error_response() {
-    let _guard = test_lock_guard();
-    clear_auth_probe_state_for_testing();
+    let shared = ProxySharedState::new();
+    clear_auth_probe_state_for_testing_in_shared(shared.as_ref());
 
     let good_secret = [0x22u8; 16];
     let bad_cfg = test_config_with_secret_hex("33333333333333333333333333333333");
@@ -97,8 +91,8 @@ async fn handshake_baseline_invalid_secret_triggers_fallback_not_error_response(
 
 #[tokio::test]
 async fn handshake_baseline_auth_probe_streak_increments_per_ip() {
-    let _guard = test_lock_guard();
-    clear_auth_probe_state_for_testing();
+    let shared = ProxySharedState::new();
+    clear_auth_probe_state_for_testing_in_shared(shared.as_ref());
 
     let cfg = test_config_with_secret_hex("44444444444444444444444444444444");
     let replay_checker = ReplayChecker::new(64, Duration::from_secs(60));
@@ -109,7 +103,7 @@ async fn handshake_baseline_auth_probe_streak_increments_per_ip() {
     let bad_probe = b"\x16\x03\x01\x00";
 
     for expected in 1..=3 {
-        let res = handle_tls_handshake(
+        let res = handle_tls_handshake_with_shared(
             bad_probe,
             tokio::io::empty(),
             tokio::io::sink(),
@@ -118,43 +112,44 @@ async fn handshake_baseline_auth_probe_streak_increments_per_ip() {
             &replay_checker,
             &rng,
             None,
+            shared.as_ref(),
         )
         .await;
         assert!(matches!(res, HandshakeResult::BadClient { .. }));
-        assert_eq!(auth_probe_fail_streak_for_testing(peer.ip()), Some(expected));
-        assert_eq!(auth_probe_fail_streak_for_testing(untouched_ip), None);
+        assert_eq!(auth_probe_fail_streak_for_testing_in_shared(shared.as_ref(), peer.ip()), Some(expected));
+        assert_eq!(auth_probe_fail_streak_for_testing_in_shared(shared.as_ref(), untouched_ip), None);
     }
 }
 
 #[test]
 fn handshake_baseline_saturation_fires_at_compile_time_threshold() {
-    let _guard = test_lock_guard();
-    clear_auth_probe_state_for_testing();
+    let shared = ProxySharedState::new();
+    clear_auth_probe_state_for_testing_in_shared(shared.as_ref());
 
     let ip = IpAddr::V4(Ipv4Addr::new(198, 51, 100, 33));
     let now = Instant::now();
 
     for _ in 0..AUTH_PROBE_BACKOFF_START_FAILS.saturating_sub(1) {
-        auth_probe_record_failure(ip, now);
+        auth_probe_record_failure_in(shared.as_ref(), ip, now);
     }
-    assert!(!auth_probe_is_throttled(ip, now));
+    assert!(!auth_probe_is_throttled_in(shared.as_ref(), ip, now));
 
-    auth_probe_record_failure(ip, now);
-    assert!(auth_probe_is_throttled(ip, now));
+    auth_probe_record_failure_in(shared.as_ref(), ip, now);
+    assert!(auth_probe_is_throttled_in(shared.as_ref(), ip, now));
 }
 
 #[test]
 fn handshake_baseline_repeated_probes_streak_monotonic() {
-    let _guard = test_lock_guard();
-    clear_auth_probe_state_for_testing();
+    let shared = ProxySharedState::new();
+    clear_auth_probe_state_for_testing_in_shared(shared.as_ref());
 
     let ip = IpAddr::V4(Ipv4Addr::new(203, 0, 113, 42));
     let now = Instant::now();
     let mut prev = 0u32;
 
     for _ in 0..100 {
-        auth_probe_record_failure(ip, now);
-        let current = auth_probe_fail_streak_for_testing(ip).unwrap_or(0);
+        auth_probe_record_failure_in(shared.as_ref(), ip, now);
+        let current = auth_probe_fail_streak_for_testing_in_shared(shared.as_ref(), ip).unwrap_or(0);
         assert!(current >= prev, "streak must be monotonic");
         prev = current;
     }
@@ -162,14 +157,14 @@ fn handshake_baseline_repeated_probes_streak_monotonic() {
 
 #[test]
 fn handshake_baseline_throttled_ip_incurs_backoff_delay() {
-    let _guard = test_lock_guard();
-    clear_auth_probe_state_for_testing();
+    let shared = ProxySharedState::new();
+    clear_auth_probe_state_for_testing_in_shared(shared.as_ref());
 
     let ip = IpAddr::V4(Ipv4Addr::new(198, 51, 100, 44));
     let now = Instant::now();
 
     for _ in 0..AUTH_PROBE_BACKOFF_START_FAILS {
-        auth_probe_record_failure(ip, now);
+        auth_probe_record_failure_in(shared.as_ref(), ip, now);
     }
 
     let delay = auth_probe_backoff(AUTH_PROBE_BACKOFF_START_FAILS);
@@ -178,14 +173,14 @@ fn handshake_baseline_throttled_ip_incurs_backoff_delay() {
     let before_expiry = now + delay.saturating_sub(Duration::from_millis(1));
     let after_expiry = now + delay + Duration::from_millis(1);
 
-    assert!(auth_probe_is_throttled(ip, before_expiry));
-    assert!(!auth_probe_is_throttled(ip, after_expiry));
+    assert!(auth_probe_is_throttled_in(shared.as_ref(), ip, before_expiry));
+    assert!(!auth_probe_is_throttled_in(shared.as_ref(), ip, after_expiry));
 }
 
 #[tokio::test]
 async fn handshake_baseline_malformed_probe_frames_fail_closed_to_masking() {
-    let _guard = test_lock_guard();
-    clear_auth_probe_state_for_testing();
+    let shared = ProxySharedState::new();
+    clear_auth_probe_state_for_testing_in_shared(shared.as_ref());
 
     let cfg = test_config_with_secret_hex("55555555555555555555555555555555");
     let replay_checker = ReplayChecker::new(64, Duration::from_secs(60));
