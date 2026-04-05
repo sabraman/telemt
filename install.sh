@@ -8,11 +8,19 @@ CONFIG_DIR="${CONFIG_DIR:-/etc/telemt}"
 CONFIG_FILE="${CONFIG_FILE:-${CONFIG_DIR}/telemt.toml}"
 WORK_DIR="${WORK_DIR:-/opt/telemt}"
 TLS_DOMAIN="${TLS_DOMAIN:-petrovich.ru}"
+SERVER_PORT="${SERVER_PORT:-443}"
+USER_SECRET=""
+AD_TAG=""
 SERVICE_NAME="telemt"
 TEMP_DIR=""
 SUDO=""
 CONFIG_PARENT_DIR=""
 SERVICE_START_FAILED=0
+
+PORT_PROVIDED=0
+SECRET_PROVIDED=0
+AD_TAG_PROVIDED=0
+DOMAIN_PROVIDED=0
 
 ACTION="install"
 TARGET_VERSION="${VERSION:-latest}"
@@ -25,8 +33,37 @@ while [ $# -gt 0 ]; do
                 printf '[ERROR] %s requires a domain argument.\n' "$1" >&2
                 exit 1
             fi
-            TLS_DOMAIN="$2"
-            shift 2 ;;
+            TLS_DOMAIN="$2"; DOMAIN_PROVIDED=1; shift 2 ;;
+        -p|--port)
+            if [ "$#" -lt 2 ] || [ -z "$2" ]; then
+                printf '[ERROR] %s requires a port argument.\n' "$1" >&2; exit 1
+            fi
+            case "$2" in
+                *[!0-9]*) printf '[ERROR] Port must be a valid number.\n' >&2; exit 1 ;;
+            esac
+            port_num="$(printf '%s\n' "$2" | sed 's/^0*//')"
+            [ -z "$port_num" ] && port_num="0"
+            if [ "${#port_num}" -gt 5 ] || [ "$port_num" -lt 1 ] || [ "$port_num" -gt 65535 ]; then
+                printf '[ERROR] Port must be between 1 and 65535.\n' >&2; exit 1
+            fi
+            SERVER_PORT="$port_num"; PORT_PROVIDED=1; shift 2 ;;
+        -s|--secret)
+            if [ "$#" -lt 2 ] || [ -z "$2" ]; then
+                printf '[ERROR] %s requires a secret argument.\n' "$1" >&2; exit 1
+            fi
+            case "$2" in
+                *[!0-9a-fA-F]*)
+                    printf '[ERROR] Secret must contain only hex characters.\n' >&2; exit 1 ;;
+            esac
+            if [ "${#2}" -ne 32 ]; then
+                printf '[ERROR] Secret must be exactly 32 chars.\n' >&2; exit 1
+            fi
+            USER_SECRET="$2"; SECRET_PROVIDED=1; shift 2 ;;
+        -a|--ad-tag|--ad_tag)
+            if [ "$#" -lt 2 ] || [ -z "$2" ]; then
+                printf '[ERROR] %s requires an ad_tag argument.\n' "$1" >&2; exit 1
+            fi
+            AD_TAG="$2"; AD_TAG_PROVIDED=1; shift 2 ;;
         uninstall|--uninstall)
             if [ "$ACTION" != "purge" ]; then ACTION="uninstall"; fi
             shift ;;
@@ -59,12 +96,17 @@ cleanup() {
 trap cleanup EXIT INT TERM
 
 show_help() {
-    say "Usage: $0 [ <version> | install | uninstall | purge ] [ -d <domain> ] [ --help ]"
+    say "Usage: $0 [ <version> | install | uninstall | purge ] [ options ]"
     say "  <version>    Install specific version (e.g. 3.3.15, default: latest)"
     say "  install      Install the latest version"
-    say "  uninstall    Remove the binary and service (keeps config and user)"
+    say "  uninstall    Remove the binary and service"
     say "  purge        Remove everything including configuration, data, and user"
+    say ""
+    say "Options:"
     say "  -d, --domain Set TLS domain (default: petrovich.ru)"
+    say "  -p, --port   Set server port (default: 443)"
+    say "  -s, --secret Set specific user secret (32 hex characters)"
+    say "  -a, --ad-tag Set ad_tag"
     exit 0
 }
 
@@ -81,13 +123,13 @@ get_realpath() {
     path_in="$1"
     case "$path_in" in /*) ;; *) path_in="$(pwd)/$path_in" ;; esac
 
-    if command -v realpath >/dev/null 2>&1; then 
+    if command -v realpath >/dev/null 2>&1; then
         if realpath_out="$(realpath -m "$path_in" 2>/dev/null)"; then
             printf '%s\n' "$realpath_out"
             return
         fi
     fi
-    
+
     if command -v readlink >/dev/null 2>&1; then
         resolved_path="$(readlink -f "$path_in" 2>/dev/null || true)"
         if [ -n "$resolved_path" ]; then
@@ -120,6 +162,14 @@ get_svc_mgr() {
     else echo "none"; fi
 }
 
+is_config_exists() {
+    if [ -n "$SUDO" ]; then
+        $SUDO sh -c '[ -f "$1" ]' _ "$CONFIG_FILE"
+    else
+        [ -f "$CONFIG_FILE" ]
+    fi
+}
+
 verify_common() {
     [ -n "$BIN_NAME" ] || die "BIN_NAME cannot be empty."
     [ -n "$INSTALL_DIR" ] || die "INSTALL_DIR cannot be empty."
@@ -127,7 +177,7 @@ verify_common() {
     [ -n "$CONFIG_FILE" ] || die "CONFIG_FILE cannot be empty."
 
     case "${INSTALL_DIR}${CONFIG_DIR}${WORK_DIR}${CONFIG_FILE}" in
-        *[!a-zA-Z0-9_./-]*) die "Invalid characters in paths. Only alphanumeric, _, ., -, and / allowed." ;;
+        *[!a-zA-Z0-9_./-]*) die "Invalid characters in paths." ;;
     esac
 
     case "$TARGET_VERSION" in *[!a-zA-Z0-9_.-]*) die "Invalid characters in version." ;; esac
@@ -145,11 +195,11 @@ verify_common() {
     if [ "$(id -u)" -eq 0 ]; then
         SUDO=""
     else
-        command -v sudo >/dev/null 2>&1 || die "This script requires root or sudo. Neither found."
+        command -v sudo >/dev/null 2>&1 || die "This script requires root or sudo."
         SUDO="sudo"
         if ! sudo -n true 2>/dev/null; then
             if ! [ -t 0 ]; then
-                die "sudo requires a password, but no TTY detected. Aborting to prevent hang."
+                die "sudo requires a password, but no TTY detected."
             fi
         fi
     fi
@@ -162,21 +212,7 @@ verify_common() {
         die "Safety check failed: CONFIG_FILE '$CONFIG_FILE' is a directory."
     fi
 
-    for path in "$CONFIG_DIR" "$CONFIG_PARENT_DIR" "$WORK_DIR"; do
-        check_path="$(get_realpath "$path")"
-        case "$check_path" in
-            /|/bin|/sbin|/usr|/usr/bin|/usr/sbin|/usr/local|/usr/local/bin|/usr/local/sbin|/usr/local/etc|/usr/local/share|/etc|/var|/var/lib|/var/log|/var/run|/home|/root|/tmp|/lib|/lib64|/opt|/run|/boot|/dev|/sys|/proc)
-                die "Safety check failed: '$path' (resolved to '$check_path') is a critical system directory." ;;
-        esac
-    done
-
-    check_install_dir="$(get_realpath "$INSTALL_DIR")"
-    case "$check_install_dir" in
-        /|/etc|/var|/home|/root|/tmp|/usr|/usr/local|/opt|/boot|/dev|/sys|/proc|/run)
-            die "Safety check failed: INSTALL_DIR '$INSTALL_DIR' is a critical system directory." ;;
-    esac
-
-    for cmd in id uname grep find rm chown chmod mv mktemp mkdir tr dd sed ps head sleep cat tar gzip rmdir; do
+    for cmd in id uname awk grep find rm chown chmod mv mktemp mkdir tr dd sed ps head sleep cat tar gzip; do
         command -v "$cmd" >/dev/null 2>&1 || die "Required command not found: $cmd"
     done
 }
@@ -185,14 +221,41 @@ verify_install_deps() {
     command -v curl >/dev/null 2>&1 || command -v wget >/dev/null 2>&1 || die "Neither curl nor wget is installed."
     command -v cp >/dev/null 2>&1 || command -v install >/dev/null 2>&1 || die "Need cp or install"
 
-    if ! command -v setcap >/dev/null 2>&1; then
+    if ! command -v setcap >/dev/null 2>&1 || ! command -v conntrack >/dev/null 2>&1; then
         if command -v apk >/dev/null 2>&1; then
-            $SUDO apk add --no-cache libcap-utils >/dev/null 2>&1 || $SUDO apk add --no-cache libcap >/dev/null 2>&1 || true
+            $SUDO apk add --no-cache libcap-utils libcap conntrack-tools >/dev/null 2>&1 || true
         elif command -v apt-get >/dev/null 2>&1; then
-            $SUDO apt-get update -q >/dev/null 2>&1 || true
-            $SUDO apt-get install -y -q libcap2-bin >/dev/null 2>&1 || true
-        elif command -v dnf >/dev/null 2>&1; then $SUDO dnf install -y -q libcap >/dev/null 2>&1 || true
-        elif command -v yum >/dev/null 2>&1; then $SUDO yum install -y -q libcap >/dev/null 2>&1 || true
+            $SUDO env DEBIAN_FRONTEND=noninteractive apt-get install -y -q libcap2-bin conntrack >/dev/null 2>&1 || {
+                $SUDO env DEBIAN_FRONTEND=noninteractive apt-get update -q >/dev/null 2>&1 || true
+                $SUDO env DEBIAN_FRONTEND=noninteractive apt-get install -y -q libcap2-bin conntrack >/dev/null 2>&1 || true
+            }
+        elif command -v dnf >/dev/null 2>&1; then $SUDO dnf install -y -q libcap conntrack-tools >/dev/null 2>&1 || true
+        elif command -v yum >/dev/null 2>&1; then $SUDO yum install -y -q libcap conntrack-tools >/dev/null 2>&1 || true
+        fi
+    fi
+}
+
+check_port_availability() {
+    port_info=""
+
+    if command -v ss >/dev/null 2>&1; then
+        port_info=$($SUDO ss -tulnp 2>/dev/null | grep -E ":${SERVER_PORT}([[:space:]]|$)" || true)
+    elif command -v netstat >/dev/null 2>&1; then
+        port_info=$($SUDO netstat -tulnp 2>/dev/null | grep -E ":${SERVER_PORT}([[:space:]]|$)" || true)
+    elif command -v lsof >/dev/null 2>&1; then
+        port_info=$($SUDO lsof -i :${SERVER_PORT} 2>/dev/null | grep LISTEN || true)
+    else
+        say "[WARNING] Network diagnostic tools (ss, netstat, lsof) not found. Skipping port check."
+        return 0
+    fi
+
+    if [ -n "$port_info" ]; then
+        if printf '%s\n' "$port_info" | grep -q "${BIN_NAME}"; then
+            say "  -> Port ${SERVER_PORT} is in use by ${BIN_NAME}. Ignoring as it will be restarted."
+        else
+            say "[ERROR] Port ${SERVER_PORT} is already in use by another process:"
+            printf '  %s\n' "$port_info"
+            die "Please free the port ${SERVER_PORT} or change it and try again."
         fi
     fi
 }
@@ -250,10 +313,10 @@ ensure_user_group() {
 
 setup_dirs() {
     $SUDO mkdir -p "$WORK_DIR" "$CONFIG_DIR" "$CONFIG_PARENT_DIR" || die "Failed to create directories"
-    
+
     $SUDO chown telemt:telemt "$WORK_DIR" && $SUDO chmod 750 "$WORK_DIR"
     $SUDO chown root:telemt "$CONFIG_DIR" && $SUDO chmod 750 "$CONFIG_DIR"
-    
+
     if [ "$CONFIG_PARENT_DIR" != "$CONFIG_DIR" ] && [ "$CONFIG_PARENT_DIR" != "." ] && [ "$CONFIG_PARENT_DIR" != "/" ]; then
         $SUDO chown root:telemt "$CONFIG_PARENT_DIR" && $SUDO chmod 750 "$CONFIG_PARENT_DIR"
     fi
@@ -275,17 +338,19 @@ install_binary() {
     fi
 
     $SUDO mkdir -p "$INSTALL_DIR" || die "Failed to create install directory"
+    
+    $SUDO rm -f "$bin_dst" 2>/dev/null || true
+
     if command -v install >/dev/null 2>&1; then
         $SUDO install -m 0755 "$bin_src" "$bin_dst" || die "Failed to install binary"
     else
-        $SUDO rm -f "$bin_dst" 2>/dev/null || true
         $SUDO cp "$bin_src" "$bin_dst" && $SUDO chmod 0755 "$bin_dst" || die "Failed to copy binary"
     fi
 
     $SUDO sh -c '[ -x "$1" ]' _ "$bin_dst" || die "Binary not executable: $bin_dst"
 
     if command -v setcap >/dev/null 2>&1; then
-        $SUDO setcap cap_net_bind_service=+ep "$bin_dst" 2>/dev/null || true
+        $SUDO setcap cap_net_bind_service,cap_net_admin=+ep "$bin_dst" 2>/dev/null || true
     fi
 }
 
@@ -301,11 +366,20 @@ generate_secret() {
 }
 
 generate_config_content() {
+    conf_secret="$1"
+    conf_tag="$2"
     escaped_tls_domain="$(printf '%s\n' "$TLS_DOMAIN" | tr -d '[:cntrl:]' | sed 's/\\/\\\\/g; s/"/\\"/g')"
 
     cat <<EOF
 [general]
-use_middle_proxy = false
+use_middle_proxy = true
+EOF
+
+    if [ -n "$conf_tag" ]; then
+        echo "ad_tag = \"${conf_tag}\""
+    fi
+
+    cat <<EOF
 
 [general.modes]
 classic = false
@@ -313,7 +387,7 @@ secure = false
 tls = true
 
 [server]
-port = 443
+port = ${SERVER_PORT}
 
 [server.api]
 enabled = true
@@ -324,28 +398,73 @@ whitelist = ["127.0.0.1/32"]
 tls_domain = "${escaped_tls_domain}"
 
 [access.users]
-hello = "$1"
+hello = "${conf_secret}"
 EOF
 }
 
 install_config() {
-    if [ -n "$SUDO" ]; then
-        if $SUDO sh -c '[ -f "$1" ]' _ "$CONFIG_FILE"; then
-            say "  -> Config already exists at $CONFIG_FILE. Skipping creation."
-            return 0
-        fi
-    elif [ -f "$CONFIG_FILE" ]; then
-        say "  -> Config already exists at $CONFIG_FILE. Skipping creation."
+    if is_config_exists; then
+        say "  -> Config already exists at $CONFIG_FILE. Updating parameters..."
+
+        tmp_conf="${TEMP_DIR}/config.tmp"
+        $SUDO cat "$CONFIG_FILE" > "$tmp_conf"
+        
+        escaped_domain="$(printf '%s\n' "$TLS_DOMAIN" | tr -d '[:cntrl:]' | sed 's/\\/\\\\/g; s/"/\\"/g')"
+
+        export AWK_PORT="$SERVER_PORT"
+        export AWK_SECRET="$USER_SECRET"
+        export AWK_DOMAIN="$escaped_domain"
+        export AWK_AD_TAG="$AD_TAG"
+        export AWK_FLAG_P="$PORT_PROVIDED"
+        export AWK_FLAG_S="$SECRET_PROVIDED"
+        export AWK_FLAG_D="$DOMAIN_PROVIDED"
+        export AWK_FLAG_A="$AD_TAG_PROVIDED"
+
+        awk '
+        BEGIN { ad_tag_handled = 0 }
+        
+        ENVIRON["AWK_FLAG_P"] == "1" && /^[ \t]*port[ \t]*=/ { print "port = " ENVIRON["AWK_PORT"]; next }
+        ENVIRON["AWK_FLAG_S"] == "1" && /^[ \t]*hello[ \t]*=/ { print "hello = \"" ENVIRON["AWK_SECRET"] "\""; next }
+        ENVIRON["AWK_FLAG_D"] == "1" && /^[ \t]*tls_domain[ \t]*=/ { print "tls_domain = \"" ENVIRON["AWK_DOMAIN"] "\""; next }
+        
+        ENVIRON["AWK_FLAG_A"] == "1" && /^[ \t]*ad_tag[ \t]*=/ { 
+            if (!ad_tag_handled) { 
+                print "ad_tag = \"" ENVIRON["AWK_AD_TAG"] "\""; 
+                ad_tag_handled = 1; 
+            } 
+            next 
+        }
+        ENVIRON["AWK_FLAG_A"] == "1" && /^\[general\]/ { 
+            print; 
+            if (!ad_tag_handled) { 
+                print "ad_tag = \"" ENVIRON["AWK_AD_TAG"] "\""; 
+                ad_tag_handled = 1; 
+            } 
+            next 
+        }
+        
+        { print }
+        ' "$tmp_conf" > "${tmp_conf}.new" && mv "${tmp_conf}.new" "$tmp_conf"
+
+        [ "$PORT_PROVIDED" -eq 1 ] && say "  -> Updated port: $SERVER_PORT"
+        [ "$SECRET_PROVIDED" -eq 1 ] && say "  -> Updated secret for user 'hello'"
+        [ "$DOMAIN_PROVIDED" -eq 1 ] && say "  -> Updated tls_domain: $TLS_DOMAIN"
+        [ "$AD_TAG_PROVIDED" -eq 1 ] && say "  -> Updated ad_tag"
+
+        write_root "$CONFIG_FILE" < "$tmp_conf"
+        rm -f "$tmp_conf"
         return 0
     fi
 
-    toml_secret="$(generate_secret)" || die "Failed to generate secret."
+    if [ -z "$USER_SECRET" ]; then
+        USER_SECRET="$(generate_secret)" || die "Failed to generate secret."
+    fi
 
-    generate_config_content "$toml_secret" | write_root "$CONFIG_FILE" || die "Failed to install config"
+    generate_config_content "$USER_SECRET" "$AD_TAG" | write_root "$CONFIG_FILE" || die "Failed to install config"
     $SUDO chown root:telemt "$CONFIG_FILE" && $SUDO chmod 640 "$CONFIG_FILE"
 
     say "  -> Config created successfully."
-    say "  -> Generated secret for default user 'hello': $toml_secret"
+    say "  -> Configured secret for user 'hello': $USER_SECRET"
 }
 
 generate_systemd_content() {
@@ -362,9 +481,10 @@ Group=telemt
 WorkingDirectory=$WORK_DIR
 ExecStart="${INSTALL_DIR}/${BIN_NAME}" "${CONFIG_FILE}"
 Restart=on-failure
+RestartSec=5
 LimitNOFILE=65536
-AmbientCapabilities=CAP_NET_BIND_SERVICE
-CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+AmbientCapabilities=CAP_NET_BIND_SERVICE CAP_NET_ADMIN
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE CAP_NET_ADMIN
 
 [Install]
 WantedBy=multi-user.target
@@ -395,7 +515,7 @@ install_service() {
 
         $SUDO systemctl daemon-reload || true
         $SUDO systemctl enable "$SERVICE_NAME" || true
-        
+
         if ! $SUDO systemctl start "$SERVICE_NAME"; then
             say "[WARNING] Failed to start service"
             SERVICE_START_FAILED=1
@@ -405,16 +525,16 @@ install_service() {
         $SUDO chown root:root "/etc/init.d/${SERVICE_NAME}" && $SUDO chmod 0755 "/etc/init.d/${SERVICE_NAME}"
 
         $SUDO rc-update add "$SERVICE_NAME" default 2>/dev/null || true
-        
+
         if ! $SUDO rc-service "$SERVICE_NAME" start 2>/dev/null; then
             say "[WARNING] Failed to start service"
             SERVICE_START_FAILED=1
         fi
     else
         cmd="\"${INSTALL_DIR}/${BIN_NAME}\" \"${CONFIG_FILE}\""
-        if [ -n "$SUDO" ]; then 
+        if [ -n "$SUDO" ]; then
             say "  -> Service manager not found. Start manually: sudo -u telemt $cmd"
-        else 
+        else
             say "  -> Service manager not found. Start manually: su -s /bin/sh telemt -c '$cmd'"
         fi
     fi
@@ -429,9 +549,10 @@ kill_user_procs() {
         if command -v pgrep >/dev/null 2>&1; then
             pids="$(pgrep -u telemt 2>/dev/null || true)"
         else
-            pids="$(ps -u telemt -o pid= 2>/dev/null || true)"
+            pids="$(ps -ef 2>/dev/null | awk '$1=="telemt"{print $2}' || true)"
+            [ -z "$pids" ] && pids="$(ps 2>/dev/null | awk '$2=="telemt"{print $1}' || true)"
         fi
-        
+
         if [ -n "$pids" ]; then
             for pid in $pids; do
                 case "$pid" in ''|*[!0-9]*) continue ;; *) $SUDO kill "$pid" 2>/dev/null || true ;; esac
@@ -471,15 +592,16 @@ uninstall() {
         say ">>> Stage 5: Purging configuration, data, and user"
         $SUDO rm -rf "$CONFIG_DIR" "$WORK_DIR"
         $SUDO rm -f "$CONFIG_FILE"
-        if [ "$CONFIG_PARENT_DIR" != "$CONFIG_DIR" ] && [ "$CONFIG_PARENT_DIR" != "." ] && [ "$CONFIG_PARENT_DIR" != "/" ]; then
-            $SUDO rmdir "$CONFIG_PARENT_DIR" 2>/dev/null || true
-        fi
+        sleep 1 
         $SUDO userdel telemt 2>/dev/null || $SUDO deluser telemt 2>/dev/null || true
-        $SUDO groupdel telemt 2>/dev/null || $SUDO delgroup telemt 2>/dev/null || true
+        
+        if check_os_entity group telemt; then
+            $SUDO groupdel telemt 2>/dev/null || $SUDO delgroup telemt 2>/dev/null || true
+        fi
     else
         say "Note: Configuration and user kept. Run with 'purge' to remove completely."
     fi
-    
+
     printf '\n====================================================================\n'
     printf '                    UNINSTALLATION COMPLETE\n'
     printf '====================================================================\n\n'
@@ -493,18 +615,28 @@ case "$ACTION" in
         say "Starting installation of $BIN_NAME (Version: $TARGET_VERSION)"
 
         say ">>> Stage 1: Verifying environment and dependencies"
-        verify_common; verify_install_deps
+        verify_common
+        verify_install_deps
 
-        if [ "$TARGET_VERSION" != "latest" ]; then 
+        if is_config_exists && [ "$PORT_PROVIDED" -eq 0 ]; then
+            ext_port="$($SUDO awk -F'=' '/^[ \t]*port[ \t]*=/ {gsub(/[^0-9]/, "", $2); print $2; exit}' "$CONFIG_FILE" 2>/dev/null || true)"
+            if [ -n "$ext_port" ]; then
+                SERVER_PORT="$ext_port"
+            fi
+        fi
+
+        check_port_availability
+
+        if [ "$TARGET_VERSION" != "latest" ]; then
             TARGET_VERSION="${TARGET_VERSION#v}"
         fi
-        
+
         ARCH="$(detect_arch)"; LIBC="$(detect_libc)"
         FILE_NAME="${BIN_NAME}-${ARCH}-linux-${LIBC}.tar.gz"
-        
+
         if [ "$TARGET_VERSION" = "latest" ]; then
             DL_URL="https://github.com/${REPO}/releases/latest/download/${FILE_NAME}"
-        else 
+        else
             DL_URL="https://github.com/${REPO}/releases/download/${TARGET_VERSION}/${FILE_NAME}"
         fi
 
@@ -521,7 +653,7 @@ case "$ACTION" in
                 FILE_NAME="${BIN_NAME}-${ARCH}-linux-${LIBC}.tar.gz"
                 if [ "$TARGET_VERSION" = "latest" ]; then
                     DL_URL="https://github.com/${REPO}/releases/latest/download/${FILE_NAME}"
-                else 
+                else
                     DL_URL="https://github.com/${REPO}/releases/download/${TARGET_VERSION}/${FILE_NAME}"
                 fi
                 fetch_file "$DL_URL" "${TEMP_DIR}/${FILE_NAME}" || die "Download failed"
@@ -540,13 +672,13 @@ case "$ACTION" in
 
         say ">>> Stage 4: Setting up environment (User, Group, Directories)"
         ensure_user_group; setup_dirs; stop_service
-        
+
         say ">>> Stage 5: Installing binary"
         install_binary "$EXTRACTED_BIN" "${INSTALL_DIR}/${BIN_NAME}"
-        
-        say ">>> Stage 6: Generating configuration"
+
+        say ">>> Stage 6: Generating/Updating configuration"
         install_config
-        
+
         say ">>> Stage 7: Installing and starting service"
         install_service
 
@@ -561,7 +693,7 @@ case "$ACTION" in
             printf '                      INSTALLATION SUCCESS\n'
             printf '====================================================================\n\n'
         fi
-        
+
         svc="$(get_svc_mgr)"
         if [ "$svc" = "systemd" ]; then
             printf 'To check the status of your proxy service, run:\n'
@@ -570,15 +702,18 @@ case "$ACTION" in
             printf 'To check the status of your proxy service, run:\n'
             printf '  rc-service %s status\n\n' "$SERVICE_NAME"
         fi
-        
+
+        API_LISTEN="$($SUDO awk -F'"' '/^[ \t]*listen[ \t]*=/ {print $2; exit}' "$CONFIG_FILE" 2>/dev/null || true)"
+        API_LISTEN="${API_LISTEN:-127.0.0.1:9091}"
+
         printf 'To get your user connection links (for Telegram), run:\n'
         if command -v jq >/dev/null 2>&1; then
-            printf '  curl -s http://127.0.0.1:9091/v1/users | jq -r '\''.data[] | "User: \\(.username)\\n\\(.links.tls[0] // empty)\\n"'\''\n'
+            printf '  curl -s http://%s/v1/users | jq -r '\''.data[]? | "User: \\(.username)\\n\\(.links.tls[0] // empty)\\n"'\''\n' "$API_LISTEN"
         else
-            printf '  curl -s http://127.0.0.1:9091/v1/users\n'
+            printf '  curl -s http://%s/v1/users\n' "$API_LISTEN"
             printf '  (Tip: Install '\''jq'\'' for a much cleaner output)\n'
         fi
-        
+
         printf '\n====================================================================\n'
         ;;
 esac
