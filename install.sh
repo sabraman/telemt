@@ -20,6 +20,13 @@ TARGET_VERSION="${VERSION:-latest}"
 while [ $# -gt 0 ]; do
     case "$1" in
         -h|--help) ACTION="help"; shift ;;
+        -d|--domain)
+            if [ "$#" -lt 2 ] || [ -z "$2" ]; then
+                printf '[ERROR] %s requires a domain argument.\n' "$1" >&2
+                exit 1
+            fi
+            TLS_DOMAIN="$2"
+            shift 2 ;;
         uninstall|--uninstall)
             if [ "$ACTION" != "purge" ]; then ACTION="uninstall"; fi
             shift ;;
@@ -52,11 +59,12 @@ cleanup() {
 trap cleanup EXIT INT TERM
 
 show_help() {
-    say "Usage: $0 [ <version> | install | uninstall | purge | --help ]"
+    say "Usage: $0 [ <version> | install | uninstall | purge ] [ -d <domain> ] [ --help ]"
     say "  <version>    Install specific version (e.g. 3.3.15, default: latest)"
     say "  install      Install the latest version"
     say "  uninstall    Remove the binary and service (keeps config and user)"
     say "  purge        Remove everything including configuration, data, and user"
+    say "  -d, --domain Set TLS domain (default: petrovich.ru)"
     exit 0
 }
 
