@@ -1007,6 +1007,64 @@ async fn tls_unknown_sni_mask_policy_falls_back_to_bad_client() {
 }
 
 #[tokio::test]
+async fn tls_unknown_sni_accept_policy_continues_auth_path() {
+    let secret = [0x4Bu8; 16];
+    let mut config = test_config_with_secret_hex("4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b");
+    config.censorship.unknown_sni_action = UnknownSniAction::Accept;
+
+    let replay_checker = ReplayChecker::new(128, Duration::from_secs(60));
+    let rng = SecureRandom::new();
+    let peer: SocketAddr = "198.51.100.210:44326".parse().unwrap();
+    let handshake =
+        make_valid_tls_client_hello_with_sni_and_alpn(&secret, 0, "unknown.example", &[b"h2"]);
+
+    let result = handle_tls_handshake(
+        &handshake,
+        tokio::io::empty(),
+        tokio::io::sink(),
+        peer,
+        &config,
+        &replay_checker,
+        &rng,
+        None,
+    )
+    .await;
+
+    assert!(matches!(result, HandshakeResult::Success(_)));
+}
+
+#[tokio::test]
+async fn tls_unknown_sni_accept_policy_still_requires_valid_secret() {
+    let mut config = test_config_with_secret_hex("4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c");
+    config.censorship.unknown_sni_action = UnknownSniAction::Accept;
+
+    let replay_checker = ReplayChecker::new(128, Duration::from_secs(60));
+    let rng = SecureRandom::new();
+    let peer: SocketAddr = "198.51.100.211:44326".parse().unwrap();
+    let attacker_secret = [0x4Du8; 16];
+    let handshake = make_valid_tls_client_hello_with_sni_and_alpn(
+        &attacker_secret,
+        0,
+        "unknown.example",
+        &[b"h2"],
+    );
+
+    let result = handle_tls_handshake(
+        &handshake,
+        tokio::io::empty(),
+        tokio::io::sink(),
+        peer,
+        &config,
+        &replay_checker,
+        &rng,
+        None,
+    )
+    .await;
+
+    assert!(matches!(result, HandshakeResult::BadClient { .. }));
+}
+
+#[tokio::test]
 async fn tls_missing_sni_keeps_legacy_auth_path() {
     let secret = [0x4Au8; 16];
     let mut config = test_config_with_secret_hex("4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a");

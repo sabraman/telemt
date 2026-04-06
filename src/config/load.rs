@@ -1635,6 +1635,22 @@ mod tests {
             cfg_mask.censorship.unknown_sni_action,
             UnknownSniAction::Mask
         );
+
+        let cfg_accept: ProxyConfig = toml::from_str(
+            r#"
+            [server]
+            [general]
+            [network]
+            [access]
+            [censorship]
+            unknown_sni_action = "accept"
+            "#,
+        )
+        .unwrap();
+        assert_eq!(
+            cfg_accept.censorship.unknown_sni_action,
+            UnknownSniAction::Accept
+        );
     }
 
     #[test]

@@ -813,31 +813,45 @@ where
     };
 
     if client_sni.is_some() && matched_tls_domain.is_none() && preferred_user_hint.is_none() {
-        auth_probe_record_failure_in(shared, peer.ip(), Instant::now());
-        maybe_apply_server_hello_delay(config).await;
         let sni = client_sni.as_deref().unwrap_or_default();
-        let log_now = Instant::now();
-        if should_emit_unknown_sni_warn_in(shared, log_now) {
-            warn!(
-                peer = %peer,
-                sni = %sni,
-                unknown_sni = true,
-                unknown_sni_action = ?config.censorship.unknown_sni_action,
-                "TLS handshake rejected by unknown SNI policy"
-            );
-        } else {
-            info!(
-                peer = %peer,
-                sni = %sni,
-                unknown_sni = true,
-                unknown_sni_action = ?config.censorship.unknown_sni_action,
-                "TLS handshake rejected by unknown SNI policy"
-            );
+        match config.censorship.unknown_sni_action {
+            UnknownSniAction::Accept => {
+                debug!(
+                    peer = %peer,
+                    sni = %sni,
+                    unknown_sni = true,
+                    unknown_sni_action = ?config.censorship.unknown_sni_action,
+                    "TLS handshake accepted by unknown SNI policy"
+                );
+            }
+            action @ (UnknownSniAction::Drop | UnknownSniAction::Mask) => {
+                auth_probe_record_failure_in(shared, peer.ip(), Instant::now());
+                maybe_apply_server_hello_delay(config).await;
+                let log_now = Instant::now();
+                if should_emit_unknown_sni_warn_in(shared, log_now) {
+                    warn!(
+                        peer = %peer,
+                        sni = %sni,
+                        unknown_sni = true,
+                        unknown_sni_action = ?action,
+                        "TLS handshake rejected by unknown SNI policy"
+                    );
+                } else {
+                    info!(
+                        peer = %peer,
+                        sni = %sni,
+                        unknown_sni = true,
+                        unknown_sni_action = ?action,
+                        "TLS handshake rejected by unknown SNI policy"
+                    );
+                }
+                return match action {
+                    UnknownSniAction::Drop => HandshakeResult::Error(ProxyError::UnknownTlsSni),
+                    UnknownSniAction::Mask => HandshakeResult::BadClient { reader, writer },
+                    UnknownSniAction::Accept => unreachable!(),
+                };
+            }
         }
-        return match config.censorship.unknown_sni_action {
-            UnknownSniAction::Drop => HandshakeResult::Error(ProxyError::UnknownTlsSni),
-            UnknownSniAction::Mask => HandshakeResult::BadClient { reader, writer },
-        };
     }
 
     let secrets = decode_user_secrets_in(shared, config, preferred_user_hint);

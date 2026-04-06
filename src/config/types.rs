@@ -1502,6 +1502,7 @@ pub enum UnknownSniAction {
     #[default]
     Drop,
     Mask,
+    Accept,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
