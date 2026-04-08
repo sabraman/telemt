@@ -72,7 +72,7 @@ nano /usr/local/etc/xray/config.json
         "decryption": "none"
       },
       "streamSettings": {
-        "network": "xhttp",
+        "network": "tcp",
         "security": "reality",
         "realitySettings": {
           "dest": "yahoo.com:443",
@@ -83,20 +83,34 @@ nano /usr/local/etc/xray/config.json
           "shortIds": [
             "<SHORT_ID>"
           ]
-        },
-        "xhttpSettings": {
-          "mode": "auto",
-          "path": "/api/v3/sync"
         }
+      },
+      "sockopt": {
+        "tcpFastOpen": true,
+        "tcpNoDelay": true,
+        "tcpKeepAliveIdle": 60,
+        "tcpKeepAliveInterval": 15
       }
     }
   ],
   "outbounds": [
     {
       "protocol": "freedom",
-      "tag": "direct"
+      "tag": "direct",
+      "settings": {
+        "destination": "127.0.0.1:8443"
+      }
     }
-  ]
+  ],
+  "routing": {
+    "rules": [
+      {
+        "type": "field",
+        "inboundTag": ["all-in"],
+        "outboundTag": "direct"
+      }
+    ]
+  }
 }
 ```
 
@@ -158,7 +172,7 @@ nano /usr/local/etc/xray/config.json
         ]
       },
       "streamSettings": {
-        "network": "xhttp",
+        "network": "tcp",
         "security": "reality",
         "realitySettings": {
           "serverName": "yahoo.com",
@@ -167,13 +181,18 @@ nano /usr/local/etc/xray/config.json
           "spiderX": "",
           "fingerprint": "chrome"
         },
-        "xhttpSettings": {
-          "mode": "auto",
-          "path": "/api/v3/sync",
-          "xmux": {
-            "maxConcurrency": 256
-          }
+        "sockopt": {
+          "tcpFastOpen": true,
+          "tcpNoDelay": true,
+          "tcpKeepAliveIdle": 60,
+          "tcpKeepAliveInterval": 15
         }
+      },
+      "mux": {
+        "enabled": true,
+        "concurrency": 256,
+        "xudpConcurrency": 16,
+        "xudpProxyUDP443": "reject"
       }
     }
   ]
@@ -226,37 +245,29 @@ services:
 #### Создаем файл конфигурации `haproxy.cfg`
 ```haproxy
 global
-    # Отключить детальные логи соединений под нагрузкой
-    log stdout format raw local0 err
-    maxconn 250000
-    # Использовать все ядра CPU
-    nbthread 2
-    # Тюнинг буферов и приема сокетов
-    tune.bufsize 16384
-    tune.maxaccept 64
+    log stdout format raw local0
+    maxconn 10000
 
 defaults
     log     global
     mode    tcp
+    option  tcplog
     option  clitcpka
     option  srvtcpka
     timeout connect 5s
-    timeout client  1h
-    timeout server  1h
-    # Быстрая очистка мертвых пиров
-    timeout client-fin 10s
-    timeout server-fin 10s
+    timeout client  2h
+    timeout server  2h
+    timeout check   5s
 
-frontend proxy_in
+frontend tcp_in_443
     bind *:443
-    maxconn 250000
+    maxconn 8000
     option tcp-smart-accept
-    default_backend telemt_backend
+    default_backend telemt_nodes
 
-backend telemt_backend
+backend telemt_nodes
     option tcp-smart-connect
-    # Send-Proxy-V2 обязателен для сохранения IP клиента внутри внутренней логики Telemt
-    server telemt_core 127.0.0.1:10443 maxconn 250000 send-proxy-v2 check inter 5s
+    server telemt_core 127.0.0.1:10443 check inter 5s rise 2 fall 3 maxconn 250000 send-proxy-v2
 
 ```
 >[!WARNING]
