@@ -68,7 +68,6 @@ curl -fsSL https://raw.githubusercontent.com/telemt/telemt/main/install.sh | sh
 - [Quick Start Guide EN](docs/Quick_start/QUICK_START_GUIDE.en.md)
 
 ## FAQ
-
 - [FAQ RU](docs/FAQ.ru.md)
 - [FAQ EN](docs/FAQ.en.md)
 
@@ -94,18 +93,12 @@ chmod +x /bin/telemt
 telemt config.toml
 ```
 
-### Устройства с малым объемом RAM
-Для устройств с ~1 ГБ RAM (например Raspberry Pi):
-- используется облегчённая оптимизация линковщика (thin LTO);
-- не рекомендуется включать fat LTO.
-
 ## OpenBSD
 - Руководство по сборке и настройке на английском языке [OpenBSD Guide (EN)](docs/Quick_start/OPENBSD_QUICK_START_GUIDE.en.md);
 - Пример rc.d скрипта: [contrib/openbsd/telemt.rcd](contrib/openbsd/telemt.rcd);
 - Поддержка sandbox с `pledge(2)` и `unveil(2)` пока не реализована.
 
 ## Почему Rust?
-
 - Надёжность для долгоживущих процессов;
 - Детерминированное управление ресурсами (RAII);
 - Отсутствие сборщика мусора;
