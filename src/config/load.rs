@@ -340,12 +340,29 @@ impl ProxyConfig {
         let update_every_is_explicit = general_table
             .map(|table| table.contains_key("update_every"))
             .unwrap_or(false);
+        let beobachten_is_explicit = general_table
+            .map(|table| table.contains_key("beobachten"))
+            .unwrap_or(false);
+        let beobachten_minutes_is_explicit = general_table
+            .map(|table| table.contains_key("beobachten_minutes"))
+            .unwrap_or(false);
+        let beobachten_flush_secs_is_explicit = general_table
+            .map(|table| table.contains_key("beobachten_flush_secs"))
+            .unwrap_or(false);
+        let beobachten_file_is_explicit = general_table
+            .map(|table| table.contains_key("beobachten_file"))
+            .unwrap_or(false);
         let legacy_secret_is_explicit = general_table
             .map(|table| table.contains_key("proxy_secret_auto_reload_secs"))
             .unwrap_or(false);
         let legacy_config_is_explicit = general_table
             .map(|table| table.contains_key("proxy_config_auto_reload_secs"))
             .unwrap_or(false);
+        let legacy_top_level_beobachten = parsed_toml.get("beobachten").cloned();
+        let legacy_top_level_beobachten_minutes = parsed_toml.get("beobachten_minutes").cloned();
+        let legacy_top_level_beobachten_flush_secs =
+            parsed_toml.get("beobachten_flush_secs").cloned();
+        let legacy_top_level_beobachten_file = parsed_toml.get("beobachten_file").cloned();
         let stun_servers_is_explicit = network_table
             .map(|table| table.contains_key("stun_servers"))
             .unwrap_or(false);
@@ -356,6 +373,63 @@ impl ProxyConfig {
 
         if !update_every_is_explicit && (legacy_secret_is_explicit || legacy_config_is_explicit) {
             config.general.update_every = None;
+        }
+
+        // Backward compatibility: legacy top-level beobachten* keys.
+        // Prefer `[general].*` when both are present.
+        let mut legacy_beobachten_applied = false;
+        if !beobachten_is_explicit
+            && let Some(value) = legacy_top_level_beobachten.as_ref()
+        {
+            let parsed = value.as_bool().ok_or_else(|| {
+                ProxyError::Config("beobachten (top-level) must be a boolean".to_string())
+            })?;
+            config.general.beobachten = parsed;
+            legacy_beobachten_applied = true;
+        }
+        if !beobachten_minutes_is_explicit
+            && let Some(value) = legacy_top_level_beobachten_minutes.as_ref()
+        {
+            let raw = value.as_integer().ok_or_else(|| {
+                ProxyError::Config("beobachten_minutes (top-level) must be an integer".to_string())
+            })?;
+            let parsed = u64::try_from(raw).map_err(|_| {
+                ProxyError::Config(
+                    "beobachten_minutes (top-level) must be within u64 range".to_string(),
+                )
+            })?;
+            config.general.beobachten_minutes = parsed;
+            legacy_beobachten_applied = true;
+        }
+        if !beobachten_flush_secs_is_explicit
+            && let Some(value) = legacy_top_level_beobachten_flush_secs.as_ref()
+        {
+            let raw = value.as_integer().ok_or_else(|| {
+                ProxyError::Config(
+                    "beobachten_flush_secs (top-level) must be an integer".to_string(),
+                )
+            })?;
+            let parsed = u64::try_from(raw).map_err(|_| {
+                ProxyError::Config(
+                    "beobachten_flush_secs (top-level) must be within u64 range".to_string(),
+                )
+            })?;
+            config.general.beobachten_flush_secs = parsed;
+            legacy_beobachten_applied = true;
+        }
+        if !beobachten_file_is_explicit
+            && let Some(value) = legacy_top_level_beobachten_file.as_ref()
+        {
+            let parsed = value.as_str().ok_or_else(|| {
+                ProxyError::Config("beobachten_file (top-level) must be a string".to_string())
+            })?;
+            config.general.beobachten_file = parsed.to_string();
+            legacy_beobachten_applied = true;
+        }
+        if legacy_beobachten_applied {
+            warn!(
+                "top-level beobachten* keys are deprecated; use general.beobachten* instead"
+            );
         }
 
         let legacy_nat_stun = config.general.middle_proxy_nat_stun.take();
@@ -1386,6 +1460,21 @@ mod tests {
     const TEST_SHADOWSOCKS_URL: &str =
         "ss://2022-blake3-aes-256-gcm:MDEyMzQ1Njc4OTAxMjM0NTY3ODkwMTIzNDU2Nzg5MDE=@127.0.0.1:8388";
 
+    fn load_config_from_temp_toml(toml: &str) -> ProxyConfig {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("telemt_load_cfg_{nonce}"));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.toml");
+        std::fs::write(&path, toml).unwrap();
+        let cfg = ProxyConfig::load(&path).unwrap();
+        let _ = std::fs::remove_file(path);
+        let _ = std::fs::remove_dir(dir);
+        cfg
+    }
+
     #[test]
     fn serde_defaults_remain_unchanged_for_present_sections() {
         let toml = r#"
@@ -1482,6 +1571,7 @@ mod tests {
             cfg.general.rpc_proxy_req_every,
             default_rpc_proxy_req_every()
         );
+        assert_eq!(cfg.general.beobachten_file, default_beobachten_file());
         assert_eq!(cfg.general.update_every, default_update_every());
         assert_eq!(cfg.server.listen_addr_ipv4, default_listen_addr_ipv4());
         assert_eq!(cfg.server.listen_addr_ipv6, default_listen_addr_ipv6_opt());
@@ -1649,6 +1739,7 @@ mod tests {
             default_upstream_connect_failfast_hard_errors()
         );
         assert_eq!(general.rpc_proxy_req_every, default_rpc_proxy_req_every());
+        assert_eq!(general.beobachten_file, default_beobachten_file());
         assert_eq!(general.update_every, default_update_every());
 
         let server = ServerConfig::default();
@@ -1862,6 +1953,54 @@ mod tests {
         )
         .unwrap();
         assert_eq!(cfg_drop.server.api.gray_action, ApiGrayAction::Drop);
+    }
+
+    #[test]
+    fn top_level_beobachten_keys_migrate_to_general_when_general_not_explicit() {
+        let cfg = load_config_from_temp_toml(
+            r#"
+            beobachten = false
+            beobachten_minutes = 7
+            beobachten_flush_secs = 3
+            beobachten_file = "tmp/legacy-beob.txt"
+
+            [server]
+            [general]
+            [network]
+            [access]
+            "#,
+        );
+
+        assert!(!cfg.general.beobachten);
+        assert_eq!(cfg.general.beobachten_minutes, 7);
+        assert_eq!(cfg.general.beobachten_flush_secs, 3);
+        assert_eq!(cfg.general.beobachten_file, "tmp/legacy-beob.txt");
+    }
+
+    #[test]
+    fn general_beobachten_keys_have_priority_over_legacy_top_level() {
+        let cfg = load_config_from_temp_toml(
+            r#"
+            beobachten = true
+            beobachten_minutes = 30
+            beobachten_flush_secs = 30
+            beobachten_file = "tmp/legacy-beob.txt"
+
+            [server]
+            [general]
+            beobachten = false
+            beobachten_minutes = 5
+            beobachten_flush_secs = 2
+            beobachten_file = "tmp/general-beob.txt"
+            [network]
+            [access]
+            "#,
+        );
+
+        assert!(!cfg.general.beobachten);
+        assert_eq!(cfg.general.beobachten_minutes, 5);
+        assert_eq!(cfg.general.beobachten_flush_secs, 2);
+        assert_eq!(cfg.general.beobachten_file, "tmp/general-beob.txt");
     }
 
     #[test]
