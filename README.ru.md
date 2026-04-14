@@ -85,4 +85,25 @@ telemt config.toml
 - Безопасность памяти;
 - Асинхронная архитектура Tokio.
 
+## Поддержать Telemt
+
+Telemt — это бесплатное программное обеспечение с открытым исходным кодом, разработанное в свободное время.
+Если оно оказалось вам полезным, вы можете поддержать дальнейшую разработку.
+
+Принимаемые криптовалюты (BTC, ETH, USDT, 350+ и другие):
+
+<p align="center">
+  <a href="https://nowpayments.io/donation?api_key=2bf1afd2-abc2-49f9-a012-f1e715b37223" target="_blank" rel="noreferrer noopener">
+    <img src="https://nowpayments.io/images/embeds/donation-button-white.svg" alt="Cryptocurrency & Bitcoin donation button by NOWPayments" height="80">
+  </a>
+</p>
+
+Monero (XMR) напрямую:
+
+```
+8Bk4tZEYPQWSypeD2hrUXG2rKbAKF16GqEN942ZdAP5cFdSqW6h4DwkP5cJMAdszzuPeHeHZPTyjWWFwzeFdjuci3ktfMoB
+```
+
+Все пожертвования пойдут на инфраструктуру, разработку и исследования.
+
 ![telemt_scheme](docs/assets/telemt.png)

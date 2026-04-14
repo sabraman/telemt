@@ -2105,7 +2105,7 @@ Note: This section also accepts the legacy alias `[server.admin_api]` (same sche
   - **Example**:
 
     ```toml
-    [server.listeners]
+    [[server.listeners]]
     ip = "0.0.0.0"
     ```
 ## announce
@@ -2114,7 +2114,7 @@ Note: This section also accepts the legacy alias `[server.admin_api]` (same sche
   - **Example**:
 
     ```toml
-    [server.listeners]
+    [[server.listeners]]
     ip = "0.0.0.0"
     announce = "proxy.example.com"
     ```
@@ -2124,7 +2124,7 @@ Note: This section also accepts the legacy alias `[server.admin_api]` (same sche
   - **Example**:
 
     ```toml
-    [server.listeners]
+    [[server.listeners]]
     ip = "0.0.0.0"
     announce_ip = "203.0.113.10"
     ```
@@ -2137,7 +2137,7 @@ Note: This section also accepts the legacy alias `[server.admin_api]` (same sche
     [server]
     proxy_protocol = false
 
-    [server.listeners]
+    [[server.listeners]]
     ip = "0.0.0.0"
     proxy_protocol = true
     ```
@@ -2148,7 +2148,7 @@ Note: This section also accepts the legacy alias `[server.admin_api]` (same sche
   - **Example**:
 
     ```toml
-    [server.listeners]
+    [[server.listeners]]
     ip = "0.0.0.0"
     reuse_allow = false
     ```
@@ -2906,7 +2906,7 @@ If your backend or network is very bandwidth-constrained, reduce cap first. If p
     ```
 
 
-# [upstreams]
+# [[upstreams]]
 
 
 | Key | Type | Default |
@@ -2925,18 +2925,18 @@ If your backend or network is very bandwidth-constrained, reduce cap first. If p
 
 ## type
   - **Constraints / validation**: Required field. Must be one of: `"direct"`, `"socks4"`, `"socks5"`, `"shadowsocks"`.
-  - **Description**: Selects the upstream transport implementation for this `[upstreams]` entry.
+  - **Description**: Selects the upstream transport implementation for this `[[upstreams]]` entry.
   - **Example**:
 
     ```toml
-    [upstreams]
+    [[upstreams]]
     type = "direct"
 
-    [upstreams]
+    [[upstreams]]
     type = "socks5"
     address = "127.0.0.1:9050"
 
-    [upstreams]
+    [[upstreams]]
     type = "shadowsocks"
     url = "ss://2022-blake3-aes-256-gcm:BASE64PASSWORD@127.0.0.1:8388"
     ```
@@ -2946,7 +2946,7 @@ If your backend or network is very bandwidth-constrained, reduce cap first. If p
   - **Example**:
 
     ```toml
-    [upstreams]
+    [[upstreams]]
     type = "direct"
     weight = 10
     ```
@@ -2956,7 +2956,7 @@ If your backend or network is very bandwidth-constrained, reduce cap first. If p
   - **Example**:
 
     ```toml
-    [upstreams]
+    [[upstreams]]
     type = "socks5"
     address = "127.0.0.1:9050"
     enabled = false
@@ -2967,7 +2967,7 @@ If your backend or network is very bandwidth-constrained, reduce cap first. If p
   - **Example**:
 
     ```toml
-    [upstreams]
+    [[upstreams]]
     type = "socks4"
     address = "10.0.0.10:1080"
     scopes = "me, fetch, dc2"
@@ -2981,11 +2981,11 @@ If your backend or network is very bandwidth-constrained, reduce cap first. If p
   - **Example**:
 
     ```toml
-    [upstreams]
+    [[upstreams]]
     type = "direct"
     interface = "eth0"
 
-    [upstreams]
+    [[upstreams]]
     type = "socks5"
     address = "203.0.113.10:1080"
     interface = "192.0.2.10" # explicit local bind IP
@@ -2998,7 +2998,7 @@ If your backend or network is very bandwidth-constrained, reduce cap first. If p
   - **Example**:
 
     ```toml
-    [upstreams]
+    [[upstreams]]
     type = "direct"
     bind_addresses = ["192.0.2.10", "192.0.2.11"]
     ```
@@ -3014,7 +3014,7 @@ If your backend or network is very bandwidth-constrained, reduce cap first. If p
     [general]
     use_middle_proxy = false
 
-    [upstreams]
+    [[upstreams]]
     type = "shadowsocks"
     url = "ss://2022-blake3-aes-256-gcm:BASE64PASSWORD@127.0.0.1:8388"
     ```
@@ -3024,7 +3024,7 @@ If your backend or network is very bandwidth-constrained, reduce cap first. If p
   - **Example**:
 
     ```toml
-    [upstreams]
+    [[upstreams]]
     type = "socks5"
     address = "127.0.0.1:9050"
     ```
@@ -3034,7 +3034,7 @@ If your backend or network is very bandwidth-constrained, reduce cap first. If p
   - **Example**:
 
     ```toml
-    [upstreams]
+    [[upstreams]]
     type = "socks4"
     address = "127.0.0.1:1080"
     user_id = "telemt"
@@ -3045,7 +3045,7 @@ If your backend or network is very bandwidth-constrained, reduce cap first. If p
   - **Example**:
 
     ```toml
-    [upstreams]
+    [[upstreams]]
     type = "socks5"
     address = "127.0.0.1:9050"
     username = "alice"
@@ -3056,7 +3056,7 @@ If your backend or network is very bandwidth-constrained, reduce cap first. If p
   - **Example**:
 
     ```toml
-    [upstreams]
+    [[upstreams]]
     type = "socks5"
     address = "127.0.0.1:9050"
     username = "alice"
